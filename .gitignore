@@ -5,3 +5,4 @@ config.yaml
 data/
 .copilot/
 .playwright-mcp/
+docs/cameras.xml
