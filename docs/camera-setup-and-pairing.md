@@ -98,8 +98,8 @@ Different camera models expose snapshots differently:
 - Channel: `ch0` (main), `ch1` (substream), etc.
 
 **Raptor cameras (HTTPS with authentication):**
-- URL: `https://<camera-ip>:8080/snap.jpg`
-- Port: 8080
+- URL: `https://<camera-ip>:8443/snap.jpg`
+- Port: 8443
 - Requires ONVIF credentials
 
 ---

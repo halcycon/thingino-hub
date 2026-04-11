@@ -295,12 +295,12 @@ class CameraUrlFallbackTests(unittest.TestCase):
             api_streamer="raptor",
         )
 
-        self.assertEqual(hub._camera_snapshot_url(camera), "https://192.168.88.160:8080/snap.jpg")
+        self.assertEqual(hub._camera_snapshot_url(camera), "https://192.168.88.160:8443/snap.jpg")
         self.assertEqual(
             hub._camera_snapshot_url(camera, "ch1"),
-            "https://192.168.88.160:8080/snap.jpg?stream=1",
+            "https://192.168.88.160:8443/snap.jpg?stream=1",
         )
-        self.assertEqual(hub._camera_mjpeg_url(camera), "https://192.168.88.160:8080/mjpeg")
+        self.assertEqual(hub._camera_mjpeg_url(camera), "https://192.168.88.160:8443/mjpeg")
 
 
 class AutoPairingTests(unittest.TestCase):

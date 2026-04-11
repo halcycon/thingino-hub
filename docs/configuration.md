@@ -77,7 +77,7 @@ snapshot_url: "http://192.168.1.50/x/ch0.jpg"
 
 **Raptor cameras (HTTPS, requires authentication):**
 ```yaml
-snapshot_url: "https://192.168.1.50:8080/snap.jpg"
+snapshot_url: "https://192.168.1.50:8443/snap.jpg"
 onvif_username: "thingino"
 onvif_password: "thingino"
 ```

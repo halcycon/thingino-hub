@@ -3297,7 +3297,7 @@ class Hub:
             if not scheme:
                 scheme = parsed_snapshot.scheme if parsed_snapshot.scheme in {"http", "https"} else "https"
             query = "stream=1" if normalized_stream == "ch1" else ""
-            return urllib.parse.urlunsplit((scheme, f"{host}:8080", "/snap.jpg", query, ""))
+            return urllib.parse.urlunsplit((scheme, f"{host}:8443", "/snap.jpg", query, ""))
 
         if snapshot_url:
             parsed = parsed_snapshot
@@ -3334,7 +3334,7 @@ class Hub:
             scheme = parsed_api.scheme if parsed_api.scheme in {"http", "https"} else ""
             if not scheme:
                 scheme = parsed_snapshot.scheme if parsed_snapshot.scheme in {"http", "https"} else "https"
-            return urllib.parse.urlunsplit((scheme, f"{host}:8080", "/mjpeg", "", ""))
+            return urllib.parse.urlunsplit((scheme, f"{host}:8443", "/mjpeg", "", ""))
 
         host = self._camera_public_host(camera)
         if host:

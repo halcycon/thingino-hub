@@ -1834,14 +1834,14 @@ class WebRouteTests(unittest.TestCase):
 
     def test_snapshot_route_uses_basic_auth_for_raptor_snapshots(self) -> None:
         self.hub.camera["api_streamer"] = "raptor"
-        self.hub.camera["snapshot_url"] = "https://192.168.1.2:8080/snap.jpg"
+        self.hub.camera["snapshot_url"] = "https://192.168.1.2:8443/snap.jpg"
         upstream = FakeUpstreamResponse(b"\xff\xd8\xff\xe0", {"Content-Type": "image/jpeg"})
         with mock.patch("app.web.urllib.request.urlopen", return_value=upstream) as mocked_urlopen:
             response = self.client.get("/snapshot/cam1?stream=ch0")
 
         self.assertEqual(response.status_code, 200)
         request_to_camera = mocked_urlopen.call_args[0][0]
-        self.assertEqual(request_to_camera.full_url, "https://192.168.1.2:8080/snap.jpg")
+        self.assertEqual(request_to_camera.full_url, "https://192.168.1.2:8443/snap.jpg")
         self.assertTrue(str(request_to_camera.get_header("Authorization")).startswith("Basic "))
 
     def test_snapshot_route_falls_back_to_ch0_when_ch1_unavailable(self) -> None:
