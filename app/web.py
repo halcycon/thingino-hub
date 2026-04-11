@@ -801,6 +801,17 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
     def enroll_page() -> str:
         return render_template("enroll.html")
 
+    @app.get("/api/export/tinycam")
+    def api_export_tinycam() -> Response:
+        """Export cameras as TinyCam Monitor XML"""
+        cameras = hub.list_cameras_for_ui()
+        xml_content = _generate_tinycam_xml(cameras)
+        return Response(
+            xml_content,
+            mimetype="application/xml",
+            headers={"Content-Disposition": 'attachment; filename="cameras.xml"'}
+        )
+
     @app.get("/api/events")
     @app.get("/events/feed")
     def api_events() -> Response:
@@ -2301,3 +2312,89 @@ def _int_value(raw: Any, default: int) -> int:
     if not text:
         return default
     return int(text)
+
+
+def _generate_tinycam_xml(cameras: list[dict[str, Any]]) -> str:
+    """Generate TinyCam Monitor cameras.xml format from hub camera list.
+    
+    This creates an Android SharedPreferences XML file compatible with
+    TinyCam Monitor app for importing camera configurations.
+    """
+    import base64
+    
+    lines = [
+        "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>",
+        "<map>",
+    ]
+    
+    camera_index = 1
+    for camera in cameras:
+        cam_key = f"cam{camera_index}"
+        
+        # Basic camera info
+        name = camera.get("name", f"Camera {camera_index}").strip()
+        if name:
+            lines.append(f'    <string name="preference_{cam_key}_name">{_xml_escape(name)}</string>')
+        
+        # Snapshot URL (for preview)
+        snapshot_url = camera.get("snapshot_url", "").strip()
+        if snapshot_url:
+            lines.append(f'    <string name="preference_{cam_key}_url">{_xml_escape(snapshot_url)}</string>')
+        
+        # IP address
+        ip = camera.get("ip", "").strip()
+        if ip:
+            lines.append(f'    <string name="preference_{cam_key}_hostname">{_xml_escape(ip)}</string>')
+        
+        # RTSP stream URL (if available from API)
+        if ip:
+            # Standard RTSP stream
+            rtsp_url = f"rtsp://{ip}:554/ch0"
+            lines.append(f'    <string name="preference_{cam_key}_stream">{_xml_escape(rtsp_url)}</string>')
+        
+        # ONVIF endpoint
+        onvif_endpoint = camera.get("onvif_endpoint", "").strip()
+        if onvif_endpoint:
+            lines.append(f'    <string name="preference_{cam_key}_onvif">{_xml_escape(onvif_endpoint)}</string>')
+        
+        # Camera ID (for reference)
+        camera_id = camera.get("camera_id", "").strip()
+        if camera_id:
+            lines.append(f'    <string name="preference_{cam_key}_id">{_xml_escape(camera_id)}</string>')
+        
+        # ONVIF username (base64 encoded like TinyCam does)
+        onvif_username = camera.get("onvif_username", "").strip()
+        if onvif_username:
+            encoded = base64.b64encode(onvif_username.encode()).decode()
+            lines.append(f'    <string name="{cam_key}_username">{_xml_escape(encoded)}</string>')
+        
+        # ONVIF password (base64 encoded like TinyCam does)
+        onvif_password = camera.get("onvif_password", "").strip()
+        if onvif_password:
+            encoded = base64.b64encode(onvif_password.encode()).decode()
+            lines.append(f'    <string name="{cam_key}_password">{_xml_escape(encoded)}</string>')
+        
+        # Device model/vendor if available
+        vendor = camera.get("onvif_manufacturer", "").strip()
+        if vendor:
+            lines.append(f'    <string name="preference_{cam_key}_vendor">{_xml_escape(vendor)}</string>')
+        
+        model = camera.get("onvif_model", "").strip()
+        if model:
+            lines.append(f'    <string name="preference_{cam_key}_model">{_xml_escape(model)}</string>')
+        
+        camera_index += 1
+    
+    lines.append("</map>")
+    return "\n".join(lines)
+
+
+def _xml_escape(text: str) -> str:
+    """Escape special XML characters"""
+    return (text
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
