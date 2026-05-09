@@ -29,6 +29,7 @@ import paho.mqtt.client as mqtt
 import yaml
 
 from .camera_api import CameraApiClient, CameraApiError
+from .api_v2 import ApiV2Server, create_api_v2_app
 from .config_model import load_config_dict as _load_config_dict
 from .history_store import HistoryStore
 from .web import WebServer, create_web_app
@@ -3078,6 +3079,16 @@ class Hub:
                 for update in updates:
                     self.update_offset = int(update["update_id"]) + 1
                     self._handle_update(update)
+            except urllib.error.HTTPError as error:
+                if self.stop_event.is_set():
+                    break
+                self.last_telegram_error = str(error)
+                if int(getattr(error, "code", 0)) == 409:
+                    LOG.warning("Telegram polling conflict (HTTP 409); another poller may be active, retrying.")
+                    time.sleep(5)
+                    continue
+                LOG.exception("Telegram polling failed")
+                time.sleep(5)
             except Exception:
                 if self.stop_event.is_set():
                     break
@@ -4939,7 +4950,7 @@ class Hub:
         camera_ip = str(camera.ip or "").strip()
         if not camera_image_id or not camera_ip:
             return ""
-        return f"CAMERA={camera_image_id} IP={camera_ip} make cleanbuild upgrade_ota"
+        return f"CAMERA={camera_image_id} IP={camera_ip} make cleanbuild ota"
 
     def _timestamp_is_recent(self, timestamp: int | None, window_seconds: int) -> bool:
         if timestamp is None or window_seconds <= 0:
@@ -5293,7 +5304,11 @@ def main() -> int:
     ui_password = os.environ.get("HUB_UI_PASSWORD") or str(ui_config.get("password") or "")
     if (ui_username and not ui_password) or (ui_password and not ui_username):
         LOG.warning("Web UI auth is disabled because both HUB_UI_USERNAME and HUB_UI_PASSWORD are required")
+    api_v2_enabled = str(os.environ.get("HUB_API_V2_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    api_v2_host = os.environ.get("HUB_API_V2_HOST", ui_host)
+    api_v2_port = int(os.environ.get("HUB_API_V2_PORT", "8090"))
     web_server = WebServer(create_web_app(hub, ui_username=ui_username, ui_password=ui_password), ui_host, ui_port)
+    api_v2_server = ApiV2Server(create_api_v2_app(hub), api_v2_host, api_v2_port) if api_v2_enabled else None
     hub_thread = threading.Thread(target=hub.start, name="telegrambothub-main", daemon=True)
     background_threads: list[threading.Thread] = []
     if hub.snapshot_heartbeat_interval_seconds > 0:
@@ -5309,6 +5324,8 @@ def main() -> int:
         LOG.info("Stopping hub")
         hub.stop()
         web_server.stop()
+        if api_v2_server is not None:
+            api_v2_server.stop()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
@@ -5318,12 +5335,17 @@ def main() -> int:
     for worker in background_threads:
         worker.start()
     web_server.start()
+    if api_v2_server is not None:
+        api_v2_server.start()
     while (hub_thread.is_alive() or any(worker.is_alive() for worker in background_threads)) and not hub.stop_event.wait(0.5):
         pass
     hub.stop()
     web_server.stop()
+    if api_v2_server is not None:
+        api_v2_server.stop()
     hub_thread.join(timeout=5)
-    probe_thread.join(timeout=5)
+    for worker in background_threads:
+        worker.join(timeout=5)
     LOG.info("Stopped telegrambothub")
     return 0
 

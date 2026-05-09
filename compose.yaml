@@ -13,8 +13,12 @@ services:
       HUB_UI_PORT: 8080
       HUB_UI_USERNAME: ${HUB_UI_USERNAME:-}
       HUB_UI_PASSWORD: ${HUB_UI_PASSWORD:-}
+      HUB_API_V2_ENABLED: ${HUB_API_V2_ENABLED:-0}
+      HUB_API_V2_HOST: 0.0.0.0
+      HUB_API_V2_PORT: ${HUB_API_V2_PORT:-8090}
     ports:
       - "8080:8080"
+      - "${HUB_API_V2_PORT:-8090}:${HUB_API_V2_PORT:-8090}"
     volumes:
       - ./app:/app/app:Z
       - ./config.yaml:/config/config.yaml:Z

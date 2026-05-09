@@ -96,6 +96,114 @@ You should see:
 - Status of the Telegram bot and MQTT broker
 - A roster of discovered cameras (if any are online)
 
+### Optional: Enable FastAPI API v2 teaser
+
+The hub now includes an optional FastAPI-powered teaser API that runs alongside the existing Flask UI with minimal disruption.
+
+Set:
+
+```sh
+export HUB_API_V2_ENABLED=1
+export HUB_API_V2_PORT=8090
+```
+
+Then restart the hub and open:
+
+- `http://127.0.0.1:8090/api/v2/docs`
+- `http://127.0.0.1:8090/api/v2/health`
+- `http://127.0.0.1:8090/api/v2/cameras`
+
+When this flag is enabled, selected dashboard and camera-detail UI actions are routed through API v2 first, with automatic fallback to the existing Flask handler if API v2 is unavailable.
+
+Practical teaser use case: quickly identify cameras that need operator attention:
+
+```sh
+curl -s "http://127.0.0.1:8090/api/v2/cameras/attention?minimum_severity=high&limit=10"
+```
+
+This endpoint surfaces cameras with actionable issues (offline state, API failures, incomplete setup, MQTT visibility/command problems) and returns suggested next actions.
+
+Migration progress teaser: a first set of action endpoints is now available in API v2:
+
+- `POST /api/v2/cameras/{camera_id}/hydrate`
+- `POST /api/v2/cameras/{camera_id}/refresh/api`
+- `POST /api/v2/cameras/{camera_id}/refresh/onvif`
+- `POST /api/v2/cameras/{camera_id}/refresh/snapshot`
+- `POST /api/v2/cameras/{camera_id}/service/{service_name}/{operation}`
+- `POST /api/v2/cameras/{camera_id}/streaming/start`
+- `POST /api/v2/cameras/{camera_id}/streaming/stop`
+- `POST /api/v2/cameras/{camera_id}/streaming/restart`
+- `POST /api/v2/cameras/{camera_id}/rescan`
+- `POST /api/v2/cameras/{camera_id}/privacy`
+- `POST /api/v2/cameras/{camera_id}/daynight`
+- `POST /api/v2/cameras/{camera_id}/record`
+- `POST /api/v2/cameras/{camera_id}/config/patch`
+- `POST /api/v2/cameras/{camera_id}/apply-supported-config`
+- `POST /api/v2/cameras/{camera_id}/send2-test/{service_name}`
+- `POST /api/v2/enroll`
+- `POST /api/v2/cameras/{camera_id}/connect`
+- `POST /api/v2/bulk-action`
+- `POST /api/v2/enroll/probe`
+- `POST /api/v2/enroll/pairing-bundle`
+- `POST /api/v2/enroll/pairing-install`
+- `POST /api/v2/cameras/{camera_id}/pair`
+- `POST /api/v2/cameras/{camera_id}/delete`
+
+Example:
+
+```sh
+curl -sX POST "http://127.0.0.1:8090/api/v2/cameras/cam1/refresh/api"
+```
+
+```sh
+curl -sX POST "http://127.0.0.1:8090/api/v2/cameras/cam1/service/streaming/restart"
+```
+
+```sh
+curl -sX POST "http://127.0.0.1:8090/api/v2/cameras/cam1/daynight" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"night"}'
+```
+
+```sh
+curl -sX POST "http://127.0.0.1:8090/api/v2/cameras/cam1/send2-test/telegram" \
+  -H "Content-Type: application/json" \
+  -d '{"verbose":true,"send_type":"photo"}'
+```
+
+```sh
+curl -sX POST "http://127.0.0.1:8090/api/v2/cameras/cam1/pair"
+```
+
+```sh
+curl -sX POST "http://127.0.0.1:8090/api/v2/enroll" \
+  -H "Content-Type: application/json" \
+  -d '{"camera_id":"cam1","ip":"192.168.1.10","onvif_username":"thingino","onvif_password":"thingino"}'
+```
+
+```sh
+curl -sX POST "http://127.0.0.1:8090/api/v2/cameras/cam1/connect" \
+  -H "Content-Type: application/json" \
+  -d '{"onvif_username":"thingino","onvif_password":"thingino"}'
+```
+
+```sh
+curl -sX POST "http://127.0.0.1:8090/api/v2/bulk-action" \
+  -H "Content-Type: application/json" \
+  -d '{"camera_ids":["cam1","cam2"],"action":"refresh-api"}'
+```
+
+Live validation checklist for newly started agents:
+
+```sh
+curl -s "http://127.0.0.1:8090/api/v2/cameras/cam1/payload"
+```
+
+Look for:
+- `mqtt_command_capable: true`
+- `present_on_mqtt_broker: true`
+- `setup_status: pair` (before pair) or `setup_status: paired` (after pair)
+
 ### 5. Connect Your First Camera
 
 1. Open the `/enroll` page in the dashboard
