@@ -57,7 +57,7 @@ class FakeHub:
             "name": "Test Camera",
             "status": "online",
             "camera_image_id": "wyze_cam3_t31x_gc2053_atbm6031",
-            "ota_upgrade_command": "CAMERA=wyze_cam3_t31x_gc2053_atbm6031 IP=192.168.1.2 make cleanbuild upgrade_ota",
+            "ota_upgrade_command": "CAMERA=wyze_cam3_t31x_gc2053_atbm6031 IP=192.168.1.2 make cleanbuild ota",
             "api_status": "online",
             "api_last_ok_at": "now",
             "api_last_error": "",
@@ -846,7 +846,39 @@ class WebRouteTests(unittest.TestCase):
         self.assertNotIn('src="/preview-webrtc/cam1"', body)
         self.assertIn("Preview uses WebRTC for this camera.", body)
         self.assertIn('/snapshot/cam1?stream=ch1', body)
+        self.assertIn('/camera/cam1/screenshot/download?stream=ch1', body)
         self.assertIn('data-copy-text="https://192.168.1.2:8554/webrtc"', body)
+
+    def test_camera_screenshot_download_uses_agent_snapshot_action(self) -> None:
+        self.hub.camera["api_streamer"] = "raptor"
+        self.hub.camera["api_token"] = "test-token"
+        upstream = FakeUpstreamResponse(b"\xff\xd8\xff\xe0", {"Content-Type": "image/jpeg"})
+
+        with mock.patch("app.web.urllib.request.urlopen", return_value=upstream) as mocked_urlopen:
+            response = self.client.get("/camera/cam1/screenshot/download?stream=ch1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Type"], "image/jpeg")
+        self.assertIn('attachment; filename="cam1-ch1-', response.headers.get("Content-Disposition", ""))
+        request_to_camera = mocked_urlopen.call_args[0][0]
+        self.assertEqual(request_to_camera.full_url, "https://192.168.1.2:1998/api/v1/actions/snapshot")
+        self.assertEqual(request_to_camera.get_method(), "POST")
+        self.assertEqual(request_to_camera.get_header("Authorization"), "Bearer test-token")
+        payload = json.loads((request_to_camera.data or b"{}").decode("utf-8"))
+        self.assertEqual(payload, {"stream_id": 1, "mode": "inline"})
+
+    def test_camera_screenshot_download_falls_back_to_agent_bridge(self) -> None:
+        self.hub.camera["api_streamer"] = "raptor"
+        upstream = FakeUpstreamResponse(b"\xff\xd8\xff\xe0", {"Content-Type": "image/jpeg"})
+
+        with mock.patch("app.web.urllib.request.urlopen", side_effect=[Exception("offline"), upstream]) as mocked_urlopen:
+            response = self.client.get("/camera/cam1/screenshot/download?stream=ch1")
+
+        self.assertEqual(response.status_code, 200)
+        first_request = mocked_urlopen.call_args_list[0][0][0]
+        second_request = mocked_urlopen.call_args_list[1][0][0]
+        self.assertEqual(first_request.full_url, "https://192.168.1.2:1998/api/v1/actions/snapshot")
+        self.assertEqual(second_request.full_url, "http://192.168.1.2/x/agent.cgi?agent_path=/api/v1/actions/snapshot")
 
     def test_camera_detail_uses_mjpeg_even_when_placeholder(self) -> None:
         self.hub.camera["preview_state"] = "placeholder"
@@ -941,8 +973,8 @@ class WebRouteTests(unittest.TestCase):
         self.assertIn("ONVIF", body)
         self.assertIn("Firmware Rebuild and OTA Command", body)
         self.assertIn('class="form-control font-monospace cb"', body)
-        self.assertIn('data-copy-text="CAMERA=wyze_cam3_t31x_gc2053_atbm6031 IP=192.168.1.2 make cleanbuild upgrade_ota"', body)
-        self.assertIn("CAMERA=wyze_cam3_t31x_gc2053_atbm6031 IP=192.168.1.2 make cleanbuild upgrade_ota", body)
+        self.assertIn('data-copy-text="CAMERA=wyze_cam3_t31x_gc2053_atbm6031 IP=192.168.1.2 make cleanbuild ota"', body)
+        self.assertIn("CAMERA=wyze_cam3_t31x_gc2053_atbm6031 IP=192.168.1.2 make cleanbuild ota", body)
 
     def test_camera_overrides_page_saves_changes(self) -> None:
         self.hub.config["ui"]["competency_level"] = "advanced"

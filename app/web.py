@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from .action_result_adapter import delete_outcome, pairing_outcome
 from .config_model import load_config_dict
 from flask import Flask, Response, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.serving import make_server
@@ -1171,20 +1172,13 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
                 "ip": str(camera.get("ip") or "").strip(),
             }
             result = hub.install_pairing_bundle_via_mqtt(enrollment)
-            status = str(result.get("status") or "success").strip().lower()
-            if status == "warning":
-                return action_response(
-                    f"Pairing install was published for {camera_id}, but the camera did not confirm before the timeout.",
-                    "warning",
-                    redirect_url,
-                    camera_id=camera_id,
-                )
+            outcome = pairing_outcome(camera_id, result)
             return action_response(
-                f"Pairing installed for {camera_id}; native API should come back after the agent restarts.",
-                "success",
+                str(outcome["message"]),
+                str(outcome["category"]),
                 redirect_url,
                 camera_id=camera_id,
-                reload=True,
+                reload=bool(outcome["reload"]),
             )
         except Exception as error:
             return action_response(
@@ -1544,35 +1538,13 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
     def delete_camera(camera_id: str) -> Response:
         try:
             result = hub.unregister_camera(camera_id)
-            if result["retained_cleared"]:
-                if result.get("command_published"):
-                    return action_response(
-                        f"Removed {camera_id} from the roster, asked the camera to revoke registration, and cleared its retained registration.",
-                        "success",
-                        url_for("dashboard"),
-                    )
-                else:
-                    return action_response(
-                        f"Removed {camera_id} from the roster and cleared its retained registration.",
-                        "success",
-                        url_for("dashboard"),
-                    )
-            elif result["config_removed"]:
-                detail = result["retained_error"] or "camera may reappear if it republishes registration"
-                return action_response(
-                    f"Removed {camera_id} from saved config and current roster; retained unregister did not complete: {detail}",
-                    "error",
-                    url_for("dashboard"),
-                    status_code=500,
-                )
-            else:
-                detail = result["retained_error"] or "camera may reappear if it republishes registration"
-                return action_response(
-                    f"Removed {camera_id} from the current roster only; retained unregister did not complete: {detail}",
-                    "error",
-                    url_for("dashboard"),
-                    status_code=500,
-                )
+            outcome = delete_outcome(camera_id, result)
+            return action_response(
+                str(outcome["message"]),
+                str(outcome["category"]),
+                url_for("dashboard"),
+                status_code=int(outcome["http_status"]),
+            )
         except Exception as error:
             return action_response(
                 f"Delete failed for {camera_id}: {error}",
@@ -1906,6 +1878,66 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
         response.headers["X-Accel-Buffering"] = "no"
+        return response
+
+    @app.get("/camera/<camera_id>/screenshot/download")
+    def camera_screenshot_download(camera_id: str) -> Response:
+        camera = hub.get_camera_for_ui(camera_id)
+        default_stream = "ch1" if str(camera.get("api_streamer") or "").strip().lower() == "raptor" else "ch0"
+        stream_name = str(request.args.get("stream") or default_stream).strip().lower()
+        stream_id = 1 if stream_name == "ch1" else 0
+        request_body = json.dumps(
+            {
+                "stream_id": stream_id,
+                "mode": "inline",
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        try:
+            with camera_agent_request(
+                camera_id,
+                "/actions/snapshot",
+                method="POST",
+                data=request_body,
+                accept="image/jpeg, application/json",
+            ) as upstream:
+                body = upstream.read()
+                content_type = upstream.headers.get("Content-Type", "image/jpeg")
+        except Exception:
+            try:
+                with camera_agent_bridge_request(
+                    camera_id,
+                    "/api/v1/actions/snapshot",
+                    method="POST",
+                    data=request_body,
+                    accept="image/jpeg, application/json",
+                ) as upstream:
+                    body = upstream.read()
+                    content_type = upstream.headers.get("Content-Type", "image/jpeg")
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode("utf-8", errors="replace").strip() or error.reason or f"HTTP {error.code}"
+                return Response(f"Screenshot download failed: {detail}\n", status=error.code, mimetype="text/plain")
+            except urllib.error.URLError as error:
+                return Response(f"Screenshot download failed: {error.reason}\n", status=502, mimetype="text/plain")
+            except Exception as error:
+                return Response(f"Screenshot download failed: {error}\n", status=500, mimetype="text/plain")
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace").strip() or error.reason or f"HTTP {error.code}"
+            return Response(f"Screenshot download failed: {detail}\n", status=error.code, mimetype="text/plain")
+        except urllib.error.URLError as error:
+            return Response(f"Screenshot download failed: {error.reason}\n", status=502, mimetype="text/plain")
+        except Exception as error:
+            return Response(f"Screenshot download failed: {error}\n", status=500, mimetype="text/plain")
+
+        response = Response(body, mimetype=content_type)
+        response.headers["Content-Type"] = content_type
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="{camera_id}-{stream_name}-{int(time.time())}.jpg"'
+        )
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
         return response
 
     return app
@@ -2316,75 +2348,75 @@ def _int_value(raw: Any, default: int) -> int:
 
 def _generate_tinycam_xml(cameras: list[dict[str, Any]]) -> str:
     """Generate TinyCam Monitor cameras.xml format from hub camera list.
-    
+
     This creates an Android SharedPreferences XML file compatible with
     TinyCam Monitor app for importing camera configurations.
     """
     import base64
-    
+
     lines = [
         "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>",
         "<map>",
     ]
-    
+
     camera_index = 1
     for camera in cameras:
         cam_key = f"cam{camera_index}"
-        
+
         # Basic camera info
         name = camera.get("name", f"Camera {camera_index}").strip()
         if name:
             lines.append(f'    <string name="preference_{cam_key}_name">{_xml_escape(name)}</string>')
-        
+
         # Snapshot URL (for preview)
         snapshot_url = camera.get("snapshot_url", "").strip()
         if snapshot_url:
             lines.append(f'    <string name="preference_{cam_key}_url">{_xml_escape(snapshot_url)}</string>')
-        
+
         # IP address
         ip = camera.get("ip", "").strip()
         if ip:
             lines.append(f'    <string name="preference_{cam_key}_hostname">{_xml_escape(ip)}</string>')
-        
+
         # RTSP stream URL (if available from API)
         if ip:
             # Standard RTSP stream
             rtsp_url = f"rtsp://{ip}:554/ch0"
             lines.append(f'    <string name="preference_{cam_key}_stream">{_xml_escape(rtsp_url)}</string>')
-        
+
         # ONVIF endpoint
         onvif_endpoint = camera.get("onvif_endpoint", "").strip()
         if onvif_endpoint:
             lines.append(f'    <string name="preference_{cam_key}_onvif">{_xml_escape(onvif_endpoint)}</string>')
-        
+
         # Camera ID (for reference)
         camera_id = camera.get("camera_id", "").strip()
         if camera_id:
             lines.append(f'    <string name="preference_{cam_key}_id">{_xml_escape(camera_id)}</string>')
-        
+
         # ONVIF username (base64 encoded like TinyCam does)
         onvif_username = camera.get("onvif_username", "").strip()
         if onvif_username:
             encoded = base64.b64encode(onvif_username.encode()).decode()
             lines.append(f'    <string name="{cam_key}_username">{_xml_escape(encoded)}</string>')
-        
+
         # ONVIF password (base64 encoded like TinyCam does)
         onvif_password = camera.get("onvif_password", "").strip()
         if onvif_password:
             encoded = base64.b64encode(onvif_password.encode()).decode()
             lines.append(f'    <string name="{cam_key}_password">{_xml_escape(encoded)}</string>')
-        
+
         # Device model/vendor if available
         vendor = camera.get("onvif_manufacturer", "").strip()
         if vendor:
             lines.append(f'    <string name="preference_{cam_key}_vendor">{_xml_escape(vendor)}</string>')
-        
+
         model = camera.get("onvif_model", "").strip()
         if model:
             lines.append(f'    <string name="preference_{cam_key}_model">{_xml_escape(model)}</string>')
-        
+
         camera_index += 1
-    
+
     lines.append("</map>")
     return "\n".join(lines)
 

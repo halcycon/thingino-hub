@@ -440,6 +440,9 @@
           {% if camera.snapshot_url %}
             <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('preview_snapshot', camera_id=camera.camera_id, stream=preview_snapshot_stream) }}" target="_blank" rel="noreferrer">Snapshot URL</a>
           {% endif %}
+          {% if camera.api_streamer == 'raptor' %}
+            <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('camera_screenshot_download', camera_id=camera.camera_id, stream='ch1') }}">Download Screenshot</a>
+          {% endif %}
           {% if camera.can_delete %}
             <button type="button" class="btn btn-outline-danger btn-sm" data-async-action="{{ url_for('delete_camera', camera_id=camera.camera_id) }}" data-confirm="Remove {{ camera.name }} from the roster? It can reappear if the camera registers again.">Delete</button>
           {% endif %}
