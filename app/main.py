@@ -3079,6 +3079,16 @@ class Hub:
                 for update in updates:
                     self.update_offset = int(update["update_id"]) + 1
                     self._handle_update(update)
+            except urllib.error.HTTPError as error:
+                if self.stop_event.is_set():
+                    break
+                self.last_telegram_error = str(error)
+                if int(getattr(error, "code", 0)) == 409:
+                    LOG.warning("Telegram polling conflict (HTTP 409); another poller may be active, retrying.")
+                    time.sleep(5)
+                    continue
+                LOG.exception("Telegram polling failed")
+                time.sleep(5)
             except Exception:
                 if self.stop_event.is_set():
                     break

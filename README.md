@@ -113,6 +113,8 @@ Then restart the hub and open:
 - `http://127.0.0.1:8090/api/v2/health`
 - `http://127.0.0.1:8090/api/v2/cameras`
 
+When this flag is enabled, selected camera-detail UI actions are routed through API v2 first, with automatic fallback to the existing Flask handler if API v2 is unavailable.
+
 Practical teaser use case: quickly identify cameras that need operator attention:
 
 ```sh

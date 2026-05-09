@@ -3,6 +3,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+from fastapi.testclient import TestClient
+
+from app.api_v2 import create_api_v2_app
 from app.web import create_web_app
 
 
@@ -1828,6 +1831,21 @@ class WebRouteTests(unittest.TestCase):
         self.assertEqual(payload["message"], "Native API refresh queued.")
         self.assertNotIn("camera", payload)
 
+    def test_refresh_api_falls_back_to_flask_when_api_v2_unreachable(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {"HUB_API_V2_ENABLED": "1", "HUB_API_V2_HOST": "127.0.0.1", "HUB_API_V2_PORT": "1"},
+            clear=False,
+        ):
+            app = create_web_app(self.hub)
+            client = app.test_client()
+            response = client.post("/refresh-api/cam1", headers=self.json_headers)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["message"], "Native API refresh queued.")
+
     def test_event_feed_returns_recent_entries(self) -> None:
         response = self.client.get("/events/feed", headers=self.json_headers)
 
@@ -2083,6 +2101,60 @@ class WebRouteTests(unittest.TestCase):
         self.assertTrue(payload["result"]["mqtt"]["reply_received"])
         self.assertEqual(payload["result"]["mqtt"]["reply_text"], "Agent bootstrap installed")
 
+
+class WebApiV2ParityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.hub = FakeHub()
+        self.api_v2 = TestClient(create_api_v2_app(self.hub))
+        self.env_patch = mock.patch.dict("os.environ", {"HUB_API_V2_ENABLED": "1"}, clear=False)
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.app = create_web_app(self.hub, api_v2_client=self.api_v2)
+        self.client = self.app.test_client()
+        self.json_headers = {
+            "Accept": "application/json",
+            "X-Requested-With": "fetch",
+        }
+
+    def test_connect_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post(
+            "/connect/cam1",
+            data={"onvif_username": "thingino", "onvif_password": "thingino"},
+            headers=self.json_headers,
+        )
+        api_response = self.api_v2.post(
+            "/api/v2/cameras/cam1/connect",
+            json={"onvif_username": "thingino", "onvif_password": "thingino"},
+        )
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["category"], "success")
+
+    def test_pair_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post("/pair/cam1", headers=self.json_headers)
+        api_response = self.api_v2.post("/api/v2/cameras/cam1/pair")
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["category"], "success")
+
+    def test_refresh_api_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post("/refresh-api/cam1", headers=self.json_headers)
+        api_response = self.api_v2.post("/api/v2/cameras/cam1/refresh/api")
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["category"], "success")
 
 if __name__ == "__main__":
     unittest.main()

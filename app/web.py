@@ -47,7 +47,7 @@ class WebServer:
         self._thread.join(timeout=5)
 
 
-def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> Flask:
+def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api_v2_client: Any | None = None) -> Flask:
     app = Flask(__name__)
     app.config["SECRET_KEY"] = "telegrambothub-ui"
     app.config["SESSION_PERMANENT"] = False
@@ -56,6 +56,10 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
     app.jinja_env.auto_reload = True
 
     auth_enabled = bool(ui_username and ui_password)
+    api_v2_enabled = str(os.environ.get("HUB_API_V2_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    api_v2_host = os.environ.get("HUB_API_V2_HOST", "127.0.0.1")
+    api_v2_port = int(os.environ.get("HUB_API_V2_PORT", "8090"))
+    api_v2_base_url = f"http://{api_v2_host}:{api_v2_port}"
 
     def current_ui_competency_level() -> str:
         try:
@@ -90,6 +94,45 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
         requested_with = str(request.headers.get("X-Requested-With") or "").strip().lower()
         accept = str(request.headers.get("Accept") or "").strip().lower()
         return requested_with == "fetch" or "application/json" in accept
+
+    def api_v2_post(path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if api_v2_client is not None:
+            response = api_v2_client.post(path, json=payload)
+            body = response.json() if response.content else {}
+            if response.status_code >= 400:
+                if isinstance(body, dict):
+                    detail = str(body.get("detail") or body.get("message") or f"HTTP {response.status_code}")
+                else:
+                    detail = f"HTTP {response.status_code}"
+                raise RuntimeError(detail)
+            return body if isinstance(body, dict) else {}
+
+        upstream_url = f"{api_v2_base_url}{path}"
+        request_data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request_to_api = urllib.request.Request(upstream_url, data=request_data, method="POST")
+        request_to_api.add_header("Accept", "application/json")
+        if request_data is not None:
+            request_to_api.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(request_to_api, timeout=10) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            detail = str(error)
+            try:
+                error_body = error.read().decode("utf-8")
+                parsed = json.loads(error_body)
+                if isinstance(parsed, dict):
+                    detail = str(parsed.get("detail") or parsed.get("message") or detail)
+            except Exception:
+                pass
+            raise RuntimeError(detail) from error
+        except Exception as error:
+            raise RuntimeError(str(error)) from error
+
+        parsed = json.loads(raw or "{}")
+        if not isinstance(parsed, dict):
+            raise RuntimeError("API v2 returned an invalid response payload")
+        return parsed
 
     def _pop_bulk_action_result() -> dict[str, Any] | None:
         value = session.pop(_BULK_ACTION_RESULT_SESSION_KEY, None)
@@ -1078,6 +1121,26 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
     @app.post("/connect/<camera_id>")
     def connect_camera(camera_id: str) -> Response:
         redirect_url = camera_page_redirect(camera_id)
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post(
+                    f"/api/v2/cameras/{camera_id}/connect",
+                    {
+                        "onvif_username": str(request.form.get("onvif_username") or "").strip(),
+                        "onvif_password": str(request.form.get("onvif_password") or ""),
+                    },
+                )
+                result = str(payload.get("result") or "success").strip().lower()
+                category = "warning" if result == "warning" else "success"
+                message = str(payload.get("message") or f"Connected {camera_id} to the hub.")
+                return action_response(
+                    message,
+                    category,
+                    redirect_url,
+                    camera_id=camera_id,
+                )
+            except Exception as error:
+                LOG.warning("API v2 connect failed for %s; falling back to Flask handler: %s", camera_id, error)
         try:
             camera = hub.get_camera_for_ui(camera_id)
             enrollment = {
@@ -1165,6 +1228,21 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
     @app.post("/pair/<camera_id>")
     def pair_camera(camera_id: str) -> Response:
         redirect_url = camera_page_redirect(camera_id)
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post(f"/api/v2/cameras/{camera_id}/pair")
+                result = str(payload.get("result") or "success").strip().lower()
+                category = "warning" if result == "warning" else "success"
+                message = str(payload.get("message") or f"Pairing installed for {camera_id}.")
+                return action_response(
+                    message,
+                    category,
+                    redirect_url,
+                    camera_id=camera_id,
+                    reload=(result == "success"),
+                )
+            except Exception as error:
+                LOG.warning("API v2 pair failed for %s; falling back to Flask handler: %s", camera_id, error)
         try:
             camera = hub.get_camera_for_ui(camera_id)
             enrollment = {
@@ -1191,6 +1269,20 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
 
     @app.post("/rescan/<camera_id>")
     def rescan_one(camera_id: str) -> Response:
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post(f"/api/v2/cameras/{camera_id}/rescan")
+                ok = bool(payload.get("ok"))
+                fallback_message = "Metadata refresh requested." if ok else "Metadata refresh request failed."
+                message = str(payload.get("message") or fallback_message)
+                return action_response(
+                    message,
+                    "success" if ok else "error",
+                    url_for("camera_detail", camera_id=camera_id),
+                    status_code=200 if ok else 400,
+                )
+            except Exception as error:
+                LOG.warning("API v2 rescan failed for %s; falling back to Flask handler: %s", camera_id, error)
         try:
             total, published = hub.rescan_cameras(camera_id)
             if published == total:
@@ -1216,6 +1308,16 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
 
     @app.post("/refresh-snapshot/<camera_id>")
     def refresh_snapshot(camera_id: str) -> Response:
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post(f"/api/v2/cameras/{camera_id}/refresh/snapshot")
+                return action_response(
+                    str(payload.get("message") or "Snapshot refresh queued."),
+                    "success",
+                    url_for("camera_detail", camera_id=camera_id),
+                )
+            except Exception as error:
+                LOG.warning("API v2 snapshot refresh failed for %s; falling back to Flask handler: %s", camera_id, error)
         try:
             result = hub.queue_snapshot_refresh(camera_id)
             if result == "scheduled":
@@ -1240,6 +1342,16 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
 
     @app.post("/refresh-onvif/<camera_id>")
     def refresh_onvif(camera_id: str) -> Response:
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post(f"/api/v2/cameras/{camera_id}/refresh/onvif")
+                return action_response(
+                    str(payload.get("message") or "ONVIF refresh queued."),
+                    "success",
+                    url_for("camera_detail", camera_id=camera_id),
+                )
+            except Exception as error:
+                LOG.warning("API v2 ONVIF refresh failed for %s; falling back to Flask handler: %s", camera_id, error)
         try:
             result = hub.queue_camera_onvif_refresh(camera_id)
             if result == "scheduled":
@@ -1264,6 +1376,16 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
 
     @app.post("/refresh-api/<camera_id>")
     def refresh_api(camera_id: str) -> Response:
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post(f"/api/v2/cameras/{camera_id}/refresh/api")
+                return action_response(
+                    str(payload.get("message") or "Native API refresh queued."),
+                    "success",
+                    url_for("camera_detail", camera_id=camera_id),
+                )
+            except Exception as error:
+                LOG.warning("API v2 API refresh failed for %s; falling back to Flask handler: %s", camera_id, error)
         try:
             result = hub.queue_camera_api_refresh(camera_id)
             if result == "scheduled":
@@ -1468,6 +1590,20 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
         enabled_value = str(request.form.get("privacy_enabled") or "").strip().lower()
         enabled = enabled_value in {"1", "true", "yes", "on", "enabled"}
         channel = str(request.form.get("privacy_channel") or "all").strip() or "all"
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post(
+                    f"/api/v2/cameras/{camera_id}/privacy",
+                    {"enabled": enabled, "channel": channel},
+                )
+                return action_response(
+                    str(payload.get("message") or ("Privacy enabled." if enabled else "Privacy disabled.")),
+                    "success",
+                    url_for("camera_detail", camera_id=camera_id),
+                    camera_payload=privacy_delta_payload(enabled),
+                )
+            except Exception as error:
+                LOG.warning("API v2 privacy update failed for %s; falling back to Flask handler: %s", camera_id, error)
         try:
             result = hub.set_camera_privacy(camera_id, enabled=enabled, channel=channel, refresh_after=False)
             state = "enabled" if enabled else "disabled"
@@ -1489,6 +1625,20 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
     @app.post("/daynight/<camera_id>")
     def set_daynight(camera_id: str) -> Response:
         mode = str(request.form.get("daynight_mode") or "").strip().lower() or "auto"
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post(
+                    f"/api/v2/cameras/{camera_id}/daynight",
+                    {"mode": mode},
+                )
+                return action_response(
+                    str(payload.get("message") or f"Day/night set to {mode}."),
+                    "success",
+                    url_for("camera_detail", camera_id=camera_id),
+                    camera_payload=daynight_delta_payload(mode),
+                )
+            except Exception as error:
+                LOG.warning("API v2 day/night update failed for %s; falling back to Flask handler: %s", camera_id, error)
         try:
             result = hub.set_camera_daynight_mode(camera_id, mode=mode, refresh_after=False)
             return action_response(
@@ -1511,6 +1661,24 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "") -> 
         try:
             duration_seconds = _optional_int_value(request.form.get("record_duration_seconds"), "record.duration_seconds")
             stream_id = _optional_int_value(request.form.get("record_stream_id"), "record.stream_id")
+            if api_v2_enabled:
+                try:
+                    payload = api_v2_post(
+                        f"/api/v2/cameras/{camera_id}/record",
+                        {
+                            "duration_seconds": duration_seconds if duration_seconds is not None else 10,
+                            "stream_id": stream_id if stream_id is not None else 0,
+                            "path": str(request.form.get("record_path") or "").strip(),
+                        },
+                    )
+                    return action_response(
+                        str(payload.get("message") or "Clip recording requested"),
+                        "success",
+                        url_for("camera_detail", camera_id=camera_id),
+                        camera_payload=action_history_delta_payload(camera_id),
+                    )
+                except Exception as error:
+                    LOG.warning("API v2 record failed for %s; falling back to Flask handler: %s", camera_id, error)
             result = hub.record_camera_clip(
                 camera_id,
                 duration_seconds=duration_seconds if duration_seconds is not None else 10,
