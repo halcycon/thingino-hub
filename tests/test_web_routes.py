@@ -367,6 +367,21 @@ class FakeHub:
             raise RuntimeError("Unknown camera")
         return "already_running"
 
+    def queue_snapshot_refresh(self, camera_id: str) -> str:
+        if camera_id != "cam1":
+            raise RuntimeError("Unknown camera")
+        return "scheduled"
+
+    def record_camera_clip(self, camera_id: str, duration_seconds: int = 10, stream_id: int = 0, path: str = ""):
+        if camera_id != "cam1":
+            raise RuntimeError("Unknown camera")
+        return {
+            "status": "accepted",
+            "result": {"path": path or "/tmp/cam1.mp4"},
+            "duration_seconds": duration_seconds,
+            "stream_id": stream_id,
+        }
+
     def set_camera_daynight_mode(self, camera_id: str, mode: str, *, refresh_after: bool = True):
         if camera_id != "cam1":
             raise RuntimeError("Unknown camera")
@@ -2134,6 +2149,24 @@ class WebApiV2ParityTests(unittest.TestCase):
         self.assertEqual(flask_payload["message"], api_payload["message"])
         self.assertEqual(flask_payload["category"], "success")
 
+    def test_enroll_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post(
+            "/enroll",
+            data={"ip": "192.168.1.3", "onvif_username": "thingino", "onvif_password": "thingino"},
+            headers=self.json_headers,
+        )
+        api_response = self.api_v2.post(
+            "/api/v2/enroll",
+            json={"ip": "192.168.1.3", "onvif_username": "thingino", "onvif_password": "thingino"},
+        )
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["result"]["camera_id"], api_payload["camera_id"])
+
     def test_pair_contract_matches_api_v2(self) -> None:
         flask_response = self.client.post("/pair/cam1", headers=self.json_headers)
         api_response = self.api_v2.post("/api/v2/cameras/cam1/pair")
@@ -2145,9 +2178,103 @@ class WebApiV2ParityTests(unittest.TestCase):
         self.assertEqual(flask_payload["message"], api_payload["message"])
         self.assertEqual(flask_payload["category"], "success")
 
+    def test_bulk_action_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post(
+            "/bulk-action",
+            data={"bulk_action": "refresh-api", "camera_ids": ["cam1"]},
+            headers=self.json_headers,
+        )
+        api_response = self.api_v2.post(
+            "/api/v2/bulk-action",
+            json={"action": "refresh-api", "camera_ids": ["cam1"]},
+        )
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["result"]["action"], api_payload["result"]["action"])
+
     def test_refresh_api_contract_matches_api_v2(self) -> None:
         flask_response = self.client.post("/refresh-api/cam1", headers=self.json_headers)
         api_response = self.api_v2.post("/api/v2/cameras/cam1/refresh/api")
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["category"], "success")
+
+    def test_refresh_onvif_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post("/refresh-onvif/cam1", headers=self.json_headers)
+        api_response = self.api_v2.post("/api/v2/cameras/cam1/refresh/onvif")
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["category"], "success")
+
+    def test_refresh_snapshot_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post("/refresh-snapshot/cam1", headers=self.json_headers)
+        api_response = self.api_v2.post("/api/v2/cameras/cam1/refresh/snapshot")
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["category"], "success")
+
+    def test_privacy_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post(
+            "/privacy/cam1",
+            data={"privacy_enabled": "true", "privacy_channel": "all"},
+            headers=self.json_headers,
+        )
+        api_response = self.api_v2.post(
+            "/api/v2/cameras/cam1/privacy",
+            json={"enabled": True, "channel": "all"},
+        )
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["category"], "success")
+
+    def test_daynight_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post(
+            "/daynight/cam1",
+            data={"daynight_mode": "day"},
+            headers=self.json_headers,
+        )
+        api_response = self.api_v2.post(
+            "/api/v2/cameras/cam1/daynight",
+            json={"mode": "day"},
+        )
+
+        self.assertEqual(flask_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        flask_payload = flask_response.get_json()
+        api_payload = api_response.json()
+        self.assertEqual(flask_payload["message"], api_payload["message"])
+        self.assertEqual(flask_payload["category"], "success")
+
+    def test_record_contract_matches_api_v2(self) -> None:
+        flask_response = self.client.post(
+            "/record/cam1",
+            data={"record_duration_seconds": "8", "record_stream_id": "1", "record_path": "/tmp/out.mp4"},
+            headers=self.json_headers,
+        )
+        api_response = self.api_v2.post(
+            "/api/v2/cameras/cam1/record",
+            json={"duration_seconds": 8, "stream_id": 1, "path": "/tmp/out.mp4"},
+        )
 
         self.assertEqual(flask_response.status_code, 200)
         self.assertEqual(api_response.status_code, 200)

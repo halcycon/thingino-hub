@@ -1084,6 +1084,32 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
     def bulk_action() -> Response:
         selected_ids = request.form.getlist("camera_ids")
         action = str(request.form.get("bulk_action") or "").strip()
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post(
+                    "/api/v2/bulk-action",
+                    {
+                        "camera_ids": selected_ids,
+                        "action": action,
+                    },
+                )
+                result = payload.get("result") if isinstance(payload.get("result"), dict) else None
+                message = str(payload.get("message") or "")
+                ok = bool(payload.get("ok"))
+                if wants_json_response():
+                    return jsonify(
+                        {
+                            "ok": ok,
+                            "message": message,
+                            "result": result or {},
+                        }
+                    )
+                if result is not None:
+                    session[_BULK_ACTION_RESULT_SESSION_KEY] = result
+                flash(message, "success" if ok else "error")
+                return redirect(url_for("dashboard"))
+            except Exception as error:
+                LOG.warning("API v2 bulk action failed; falling back to Flask handler: %s", error)
         try:
             result = hub.perform_bulk_action(selected_ids, action)
             message = f"{result['action'].replace('-', ' ').title()} finished for {result['success_count']} of {result['total']} camera(s)."
@@ -1103,6 +1129,20 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
     @app.post("/enroll")
     def enroll_camera() -> Response:
         enrollment = enrollment_request_payload()
+        if api_v2_enabled:
+            try:
+                payload = api_v2_post("/api/v2/enroll", enrollment)
+                details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+                camera_id = str(payload.get("camera_id") or details.get("camera_id") or "").strip()
+                message = str(payload.get("message") or f"Connected {camera_id} to the hub.")
+                if wants_json_response():
+                    return jsonify({"ok": True, "message": message, "result": details})
+                flash(message, "success")
+                if camera_id:
+                    return redirect(url_for("camera_detail", camera_id=camera_id))
+                return redirect(url_for("dashboard"))
+            except Exception as error:
+                LOG.warning("API v2 enroll failed; falling back to Flask handler: %s", error)
         try:
             result = hub.connect_camera(enrollment)
             message = f"Connected {result['camera_id']} to the hub."
