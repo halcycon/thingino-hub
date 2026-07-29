@@ -972,23 +972,16 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
 
     @app.post("/camera/<camera_id>/hydrate")
     def hydrate_camera_detail(camera_id: str) -> Response:
+        refreshes = {"api": "skipped", "onvif": "skipped"}
         try:
-            api_refresh = hub.queue_camera_api_refresh(camera_id)
+            refreshes = hub.queue_camera_detail_hydration_refresh(camera_id)
         except Exception as error:
-            api_refresh = f"error: {error}"
-
-        try:
-            onvif_refresh = hub.queue_camera_onvif_refresh(camera_id)
-        except Exception as error:
-            onvif_refresh = f"error: {error}"
+            refreshes = {"api": f"error: {error}", "onvif": f"error: {error}"}
 
         payload = {
             "ok": True,
             "camera": camera_detail_payload(camera_id),
-            "refreshes": {
-                "api": api_refresh,
-                "onvif": onvif_refresh,
-            },
+            "refreshes": refreshes,
         }
         return jsonify(payload)
 
@@ -1166,6 +1159,7 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
                 payload = api_v2_post(
                     f"/api/v2/cameras/{camera_id}/connect",
                     {
+                        "api_token": str(request.form.get("api_token") or "").strip(),
                         "onvif_username": str(request.form.get("onvif_username") or "").strip(),
                         "onvif_password": str(request.form.get("onvif_password") or ""),
                     },
@@ -1186,6 +1180,7 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
             enrollment = {
                 "camera_id": camera_id,
                 "ip": str(camera.get("ip") or "").strip(),
+                "api_token": str(request.form.get("api_token") or "").strip(),
                 "onvif_username": str(request.form.get("onvif_username") or "").strip(),
                 "onvif_password": str(request.form.get("onvif_password") or ""),
             }
