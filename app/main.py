@@ -1758,6 +1758,107 @@ class Hub:
     def restart_camera_streamer(self, camera_id: str) -> dict[str, Any]:
         return self.restart_camera_streaming_service(camera_id)
 
+    def _stream_setting_path(self, stream_name: str, *parts: str) -> str | None:
+        match = re.fullmatch(r"stream(\d+)", str(stream_name or "").strip())
+        if match is None:
+            return None
+        stream_id = match.group(1)
+        suffix = "/".join(str(part).strip().strip("/") for part in parts if str(part).strip())
+        if not suffix:
+            return f"streams/{stream_id}"
+        return f"streams/{stream_id}/{suffix}"
+
+    def _split_native_config_patch_for_settings(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
+        """Peel stream/OSD fields into /settings leaf patches.
+
+        Raptor's omnibus PATCH /config accepts stream/OSD payloads but only applies
+        image/motion/daynight — so hub UI previously showed a false success.
+        Leaf settings paths are the supported write surface for streams/OSD.
+        """
+        residual = dict(payload)
+        # Prudynt-style restart hints are not part of the canonical settings API.
+        residual.pop("action", None)
+        patches: list[tuple[str, dict[str, Any]]] = []
+
+        stream_field_map = {
+            "enabled": ("enabled", "enabled"),
+            "audio_enabled": ("audio-enabled", "audio_enabled"),
+            "width": ("width", "width"),
+            "height": ("height", "height"),
+            "fps": ("fps", "fps"),
+            "bitrate": ("bitrate", "bitrate"),
+            "format": ("format", "format"),
+            "mode": ("mode", "mode"),
+        }
+
+        for key in list(residual.keys()):
+            if re.fullmatch(r"stream\d+", str(key)) is None:
+                continue
+            stream_payload = residual.pop(key)
+            if not isinstance(stream_payload, dict):
+                continue
+
+            for field_name, (path_suffix, body_key) in stream_field_map.items():
+                if field_name not in stream_payload:
+                    continue
+                path = self._stream_setting_path(str(key), path_suffix)
+                if path is None:
+                    continue
+                patches.append((path, {body_key: stream_payload[field_name]}))
+
+            osd_payload = stream_payload.get("osd")
+            if not isinstance(osd_payload, dict):
+                continue
+
+            if "enabled" in osd_payload:
+                path = self._stream_setting_path(str(key), "osd", "enabled")
+                if path is not None:
+                    patches.append((path, {"enabled": bool(osd_payload.get("enabled"))}))
+
+            time_payload = osd_payload.get("time")
+            if isinstance(time_payload, dict) and "enabled" in time_payload:
+                path = self._stream_setting_path(str(key), "osd", "time", "enabled")
+                if path is not None:
+                    patches.append((path, {"enabled": bool(time_payload.get("enabled"))}))
+
+            usertext_payload = osd_payload.get("usertext")
+            if isinstance(usertext_payload, dict):
+                if "enabled" in usertext_payload:
+                    path = self._stream_setting_path(str(key), "osd", "usertext", "enabled")
+                    if path is not None:
+                        patches.append((path, {"enabled": bool(usertext_payload.get("enabled"))}))
+                if "format" in usertext_payload:
+                    path = self._stream_setting_path(str(key), "osd", "usertext", "format")
+                    if path is not None:
+                        patches.append((path, {"format": str(usertext_payload.get("format") or "")}))
+
+            privacy_payload = osd_payload.get("privacy")
+            if isinstance(privacy_payload, dict):
+                if "enabled" in privacy_payload:
+                    path = self._stream_setting_path(str(key), "osd", "privacy", "enabled")
+                    if path is not None:
+                        patches.append((path, {"enabled": bool(privacy_payload.get("enabled"))}))
+                if "text" in privacy_payload:
+                    path = self._stream_setting_path(str(key), "osd", "privacy", "text")
+                    if path is not None:
+                        patches.append((path, {"text": str(privacy_payload.get("text") or "")}))
+                for color_key in ("fill_color", "stroke_color"):
+                    if color_key not in privacy_payload:
+                        continue
+                    path = self._stream_setting_path(
+                        str(key),
+                        "osd",
+                        "privacy",
+                        color_key.replace("_", "-"),
+                    )
+                    if path is not None:
+                        patches.append((path, {color_key: str(privacy_payload.get(color_key) or "")}))
+
+        return patches, residual
+
     def patch_camera_config(self, camera_id: str, payload: dict[str, Any], *, refresh_after: bool = True) -> dict[str, Any]:
         resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
         with self.state_lock:
@@ -1765,8 +1866,35 @@ class Hub:
         if camera is None:
             raise RuntimeError(f"Unknown camera: {camera_id}")
 
+        settings_patches, residual = self._split_native_config_patch_for_settings(payload)
+        applied: list[str] = []
         try:
-            result = self._camera_api_client(camera).patch_config(payload)
+            client = self._camera_api_client(camera)
+            for path, body in settings_patches:
+                result = client.patch_setting(path, body)
+                applied_items = result.get("applied") if isinstance(result, dict) else None
+                if isinstance(applied_items, list) and applied_items:
+                    applied.extend(str(item) for item in applied_items)
+                else:
+                    applied.append(f"settings.{path.replace('/', '.')}")
+            result: dict[str, Any] = {
+                "status": "accepted",
+                "applied": applied,
+                "staged": [],
+                "restart_required": [],
+            }
+            if residual:
+                omnibus = client.patch_config(residual)
+                if isinstance(omnibus, dict):
+                    omnibus_applied = omnibus.get("applied")
+                    if isinstance(omnibus_applied, list):
+                        applied.extend(str(item) for item in omnibus_applied)
+                    result = {
+                        **omnibus,
+                        "applied": applied,
+                    }
+                else:
+                    result["omnibus"] = omnibus
         except Exception as error:
             self._record_native_action(resolved, "patch_config", "error", str(error))
             raise
@@ -1775,7 +1903,7 @@ class Hub:
             resolved,
             "patch_config",
             "success",
-            ", ".join(sorted(payload.keys())) or str(result.get("status") or "accepted"),
+            ", ".join(applied) if applied else (", ".join(sorted(payload.keys())) or "accepted"),
         )
         self._record_history_config_changes(
             resolved,

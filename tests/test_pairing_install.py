@@ -638,5 +638,69 @@ class MqttRegistrationAndEventTests(unittest.TestCase):
         self.assertEqual(recorded[0][1], "mqtt_state")
 
 
+class NativeConfigSettingsSplitTests(unittest.TestCase):
+    def test_split_stream_osd_into_settings_leaf_patches(self) -> None:
+        hub = object.__new__(Hub)
+        patches, residual = Hub._split_native_config_patch_for_settings(
+            hub,
+            {
+                "image": {"brightness": 128},
+                "action": {"restart_thread": 3},
+                "stream0": {
+                    "fps": 25,
+                    "osd": {
+                        "enabled": True,
+                        "time": {"enabled": True},
+                        "usertext": {"enabled": True, "format": "Bird Box 01"},
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(residual, {"image": {"brightness": 128}})
+        self.assertIn(("streams/0/fps", {"fps": 25}), patches)
+        self.assertIn(("streams/0/osd/enabled", {"enabled": True}), patches)
+        self.assertIn(("streams/0/osd/time/enabled", {"enabled": True}), patches)
+        self.assertIn(("streams/0/osd/usertext/enabled", {"enabled": True}), patches)
+        self.assertIn(("streams/0/osd/usertext/format", {"format": "Bird Box 01"}), patches)
+
+    def test_patch_camera_config_writes_osd_via_settings_not_omnibus(self) -> None:
+        hub = object.__new__(Hub)
+        hub.state_lock = threading.Lock()
+        hub.cameras = {
+            "cam1": Camera(camera_id="cam1", name="Cam", ip="192.168.1.2", api_base_url="https://192.168.1.2:1998/api/v1"),
+        }
+        calls: list[tuple[str, str, dict]] = []
+
+        class FakeClient:
+            def patch_setting(self, path, payload):
+                calls.append(("setting", path, payload))
+                return {"status": "accepted", "applied": [f"settings.{path.replace('/', '.')}"]}
+
+            def patch_config(self, payload):
+                calls.append(("config", "", payload))
+                return {"status": "accepted", "applied": ["config"]}
+
+        hub._camera_api_client = lambda camera: FakeClient()
+        hub._record_native_action = lambda *args, **kwargs: None
+        hub._record_history_config_changes = lambda *args, **kwargs: None
+        hub._record_optimistic_supported_controls = lambda *args, **kwargs: None
+        hub._schedule_api_refresh = lambda camera_id: False
+        hub._schedule_supported_controls_refresh = lambda camera_id: False
+
+        result = Hub.patch_camera_config(
+            hub,
+            "cam1",
+            {
+                "stream0": {"osd": {"usertext": {"format": "Bird Box 01"}}},
+                "action": {"restart_thread": 3},
+            },
+            refresh_after=False,
+        )
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(calls, [("setting", "streams/0/osd/usertext/format", {"format": "Bird Box 01"})])
+
+
 if __name__ == "__main__":
     unittest.main()
