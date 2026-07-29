@@ -208,6 +208,8 @@ class Hub:
         self.history_recent_actions_limit = 20
         self.history_max_action_events_per_camera = 1000
         self.history_max_state_samples_per_camera = 5000
+        self.history_max_config_snapshots_per_camera = 20
+        self.history_config_snapshot_max_age_days = 90
         self.cameras, self.static_camera_ids = self._load_state()
         self.last_telegram_ok_at: float | None = None
         self.last_telegram_error = ""
@@ -690,10 +692,16 @@ class Hub:
         recent_actions_limit = max(1, int(history_cfg.get("recent_actions_limit", 20)))
         max_action_events_per_camera = max(1, int(history_cfg.get("max_action_events_per_camera", 1000)))
         max_state_samples_per_camera = max(1, int(history_cfg.get("max_state_samples_per_camera", 5000)))
+        max_config_snapshots_per_camera = max(1, int(history_cfg.get("max_config_snapshots_per_camera", 20)))
+        config_snapshot_max_age_days = max(0, int(history_cfg.get("config_snapshot_max_age_days", 90)))
         configured_path = str(history_cfg.get("path") or "").strip()
-        db_path = configured_path or os.environ.get("HUB_HISTORY_DB") or str(
-            Path(self.config_path).resolve().parent / "hub-history.sqlite3"
-        )
+        db_path = configured_path or os.environ.get("HUB_HISTORY_DB") or ""
+        if not db_path:
+            state_path = str(os.environ.get("HUB_STATE_PATH") or "").strip()
+            if state_path:
+                db_path = str(Path(state_path).resolve().parent / "hub-history.sqlite3")
+            else:
+                db_path = str(Path(self.config_path).resolve().parent / "hub-history.sqlite3")
 
         current_path = self.history_db_path
         current_store = self.history_store
@@ -701,6 +709,8 @@ class Hub:
         self.history_recent_actions_limit = recent_actions_limit
         self.history_max_action_events_per_camera = max_action_events_per_camera
         self.history_max_state_samples_per_camera = max_state_samples_per_camera
+        self.history_max_config_snapshots_per_camera = max_config_snapshots_per_camera
+        self.history_config_snapshot_max_age_days = config_snapshot_max_age_days
         self.history_db_path = db_path if enabled else ""
 
         if not enabled:
@@ -714,6 +724,8 @@ class Hub:
             and current_path == db_path
             and current_store.max_action_events_per_camera == max_action_events_per_camera
             and current_store.max_state_samples_per_camera == max_state_samples_per_camera
+            and current_store.max_config_snapshots_per_camera == max_config_snapshots_per_camera
+            and current_store.config_snapshot_max_age_days == config_snapshot_max_age_days
         ):
             return
 
@@ -722,6 +734,8 @@ class Hub:
                 db_path,
                 max_action_events_per_camera=max_action_events_per_camera,
                 max_state_samples_per_camera=max_state_samples_per_camera,
+                max_config_snapshots_per_camera=max_config_snapshots_per_camera,
+                config_snapshot_max_age_days=config_snapshot_max_age_days,
             )
         except Exception:
             LOG.warning("Failed to initialize history store at %s", db_path, exc_info=True)
@@ -1772,16 +1786,43 @@ class Hub:
         self,
         payload: dict[str, Any],
     ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
-        """Peel stream/OSD fields into /settings leaf patches.
+        """Peel stream/OSD/image fields into /settings leaf patches.
 
-        Raptor's omnibus PATCH /config accepts stream/OSD payloads but only applies
-        image/motion/daynight — so hub UI previously showed a false success.
-        Leaf settings paths are the supported write surface for streams/OSD.
+        Raptor's omnibus PATCH /config only applies a subset of image/motion/daynight
+        and ignores stream/OSD and image.anti_flicker — leaf settings paths are the
+        supported write surface for those fields.
         """
         residual = dict(payload)
         # Prudynt-style restart hints are not part of the canonical settings API.
         residual.pop("action", None)
         patches: list[tuple[str, dict[str, Any]]] = []
+
+        image_payload = residual.get("image")
+        if isinstance(image_payload, dict):
+            residual.pop("image", None)
+            image_field_map = {
+                "brightness": ("image/brightness", "brightness"),
+                "contrast": ("image/contrast", "contrast"),
+                "saturation": ("image/saturation", "saturation"),
+                "sharpness": ("image/sharpness", "sharpness"),
+                "anti_flicker": ("image/anti-flicker", "anti_flicker"),
+                "hflip": ("image/hflip", "hflip"),
+                "vflip": ("image/vflip", "vflip"),
+                "ae_compensation": ("image/ae-compensation", "ae_compensation"),
+                "core_wb_mode": ("image/core-wb-mode", "core_wb_mode"),
+                "wb_rgain": ("image/wb-rgain", "wb_rgain"),
+                "wb_bgain": ("image/wb-bgain", "wb_bgain"),
+            }
+            leftover_image: dict[str, Any] = {}
+            for field_name, value in image_payload.items():
+                mapped = image_field_map.get(str(field_name))
+                if mapped is None:
+                    leftover_image[field_name] = value
+                    continue
+                path, body_key = mapped
+                patches.append((path, {body_key: value}))
+            if leftover_image:
+                residual["image"] = leftover_image
 
         stream_field_map = {
             "enabled": ("enabled", "enabled"),
@@ -1859,7 +1900,14 @@ class Hub:
 
         return patches, residual
 
-    def patch_camera_config(self, camera_id: str, payload: dict[str, Any], *, refresh_after: bool = True) -> dict[str, Any]:
+    def patch_camera_config(
+        self,
+        camera_id: str,
+        payload: dict[str, Any],
+        *,
+        refresh_after: bool = True,
+        backup_after: bool = True,
+    ) -> dict[str, Any]:
         resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
         with self.state_lock:
             camera = self.cameras.get(resolved)
@@ -1911,6 +1959,13 @@ class Hub:
             source="native_api",
             change_type="native_patch",
         )
+        if backup_after:
+            self._schedule_camera_config_backup(
+                resolved,
+                source="hub_write",
+                label="After settings save",
+                settle_seconds=3.0,
+            )
         if refresh_after:
             self.refresh_camera_api_details(resolved)
         else:
@@ -1919,7 +1974,167 @@ class Hub:
             self._schedule_supported_controls_refresh(resolved)
         return result
 
-    def update_camera_send2_config(self, camera_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def iter_apply_supported_config_stages(
+        self,
+        camera_id: str,
+        native_payload: dict[str, Any] | None,
+        send2_payload: dict[str, Any] | None = None,
+    ):
+        """Apply settings in labeled stages, yielding progress dicts for streaming UIs."""
+        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        with self.state_lock:
+            camera = self.cameras.get(resolved)
+        if camera is None:
+            raise RuntimeError(f"Unknown camera: {camera_id}")
+
+        stages: list[tuple[str, str, dict[str, Any] | None, str]] = []
+        if isinstance(native_payload, dict) and native_payload:
+            stage_order = [
+                ("image", "Imaging"),
+                ("daynight", "Day / Night"),
+                ("motion", "Motion"),
+            ]
+            used: set[str] = set()
+            for key, label in stage_order:
+                if key in native_payload:
+                    stages.append((key, label, {key: native_payload[key]}, "native"))
+                    used.add(key)
+            for key in sorted(native_payload.keys()):
+                if key in used:
+                    continue
+                if re.fullmatch(r"stream\d+", str(key)):
+                    stream_num = str(key).replace("stream", "")
+                    label = "Main stream" if stream_num == "0" else f"Stream {stream_num}"
+                    if stream_num == "1":
+                        label = "Sub stream"
+                    stages.append((str(key), label, {key: native_payload[key]}, "native"))
+                    used.add(key)
+            leftover = {key: value for key, value in native_payload.items() if key not in used}
+            if leftover:
+                stages.append(("other", "Other camera settings", leftover, "native"))
+        if isinstance(send2_payload, dict) and send2_payload:
+            stages.append(("send2", "Send2 / motion routing", send2_payload, "send2"))
+
+        if not stages:
+            raise RuntimeError("No supported settings were provided")
+
+        total = len(stages) + 1
+        applied_summaries: list[str] = []
+        for index, (stage_id, label, payload, kind) in enumerate(stages, start=1):
+            yield {
+                "event": "stage_start",
+                "stage_id": stage_id,
+                "label": label,
+                "index": index,
+                "total": total,
+                "message": f"Applying {label}…",
+            }
+            try:
+                if kind == "native":
+                    result = self.patch_camera_config(
+                        resolved,
+                        payload or {},
+                        refresh_after=False,
+                        backup_after=False,
+                    )
+                    status = str(result.get("status") or "ok")
+                    applied_summaries.append(f"{label}: {status}")
+                else:
+                    result = self.update_camera_send2_config(
+                        resolved,
+                        payload or {},
+                        backup_after=False,
+                    )
+                    status = str(result.get("status") or result.get("result") or "ok")
+                    applied_summaries.append(f"{label}: {status}")
+            except Exception as error:
+                yield {
+                    "event": "stage_error",
+                    "stage_id": stage_id,
+                    "label": label,
+                    "index": index,
+                    "total": total,
+                    "message": f"{label} failed: {error}",
+                    "ok": False,
+                }
+                raise
+            yield {
+                "event": "stage_done",
+                "stage_id": stage_id,
+                "label": label,
+                "index": index,
+                "total": total,
+                "message": f"{label} applied",
+                "ok": True,
+            }
+
+        yield {
+            "event": "stage_start",
+            "stage_id": "backup",
+            "label": "Config backup",
+            "index": total,
+            "total": total,
+            "message": "Waiting for camera to settle, then capturing config backup…",
+        }
+        # Streamed apply can afford a synchronous backup: the UI already shows
+        # progress, and users expect a snapshot to appear after settings save.
+        backup_ok = True
+        backup_detail = ""
+        try:
+            time.sleep(3.0)
+            backup_result = self.backup_camera_config(
+                resolved,
+                source="hub_write",
+                label="After settings save",
+            )
+            backup_detail = str(backup_result.get("status_detail") or "Config backup stored")
+            yield {
+                "event": "stage_done",
+                "stage_id": "backup",
+                "label": "Config backup",
+                "index": total,
+                "total": total,
+                "message": backup_detail,
+                "ok": True,
+            }
+        except Exception as error:
+            backup_ok = False
+            backup_detail = str(error)
+            LOG.info("Config backup failed after settings apply for %s: %s", resolved, error)
+            self._record_history_action(
+                resolved,
+                "config_backup",
+                "warning",
+                backup_detail,
+                source="hub",
+            )
+            yield {
+                "event": "stage_error",
+                "stage_id": "backup",
+                "label": "Config backup",
+                "index": total,
+                "total": total,
+                "message": f"Config backup failed: {backup_detail}",
+                "ok": False,
+            }
+        complete_message = f"Settings applied: {'; '.join(applied_summaries)}"
+        if not backup_ok:
+            complete_message = f"{complete_message}. Config backup failed: {backup_detail}"
+        yield {
+            "event": "complete",
+            "ok": True,
+            "backup_ok": backup_ok,
+            "message": complete_message,
+            "applied": applied_summaries,
+        }
+
+    def update_camera_send2_config(
+        self,
+        camera_id: str,
+        payload: dict[str, Any],
+        *,
+        backup_after: bool = True,
+    ) -> dict[str, Any]:
         resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
         with self.state_lock:
             camera = self.cameras.get(resolved)
@@ -1972,7 +2187,505 @@ class Hub:
             source="native_api",
             change_type="send2_patch",
         )
+        if backup_after:
+            self._schedule_camera_config_backup(
+                resolved,
+                source="hub_write",
+                label="After send2 save",
+                settle_seconds=3.0,
+            )
         return {"status": "accepted", "applied": results}
+
+    def backup_camera_config(
+        self,
+        camera_id: str,
+        *,
+        source: str = "manual",
+        label: str = "",
+    ) -> dict[str, Any]:
+        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        with self.state_lock:
+            camera = self.cameras.get(resolved)
+        if camera is None:
+            raise RuntimeError(f"Unknown camera: {camera_id}")
+        if self.history_store is None:
+            raise RuntimeError("History database is disabled; enable it to store config backups.")
+        if not self._camera_api_base_url(camera):
+            raise RuntimeError("Native API is not configured for this camera.")
+        if str(camera.api_status or "").strip().lower() == "offline":
+            raise RuntimeError("Native API is offline for this camera.")
+
+        client = self._camera_api_client(camera)
+        # Backups often run right after a burst of leaf patches; give the camera time
+        # and use a longer read timeout than routine probes (default 5s is too short).
+        control_timeout = 15
+        control_timeout_fn = getattr(client, "_control_timeout", None)
+        if callable(control_timeout_fn):
+            try:
+                control_timeout = int(control_timeout_fn())
+            except Exception:
+                control_timeout = 15
+        config_payload = client.get_config(timeout=max(control_timeout, 30))
+        if not isinstance(config_payload, dict):
+            raise RuntimeError("Camera GET /config did not return a JSON object")
+        try:
+            capabilities_payload = client.get_capabilities()
+        except Exception:
+            LOG.debug("Config backup capabilities fetch failed for %s", resolved, exc_info=True)
+            capabilities_payload = {}
+        if not isinstance(capabilities_payload, dict):
+            capabilities_payload = {}
+
+        firmware_id = ""
+        streamer = str(camera.api_streamer or "").strip()
+        try:
+            device = client.get_device()
+        except Exception:
+            device = {}
+        if isinstance(device, dict):
+            software = device.get("software") if isinstance(device.get("software"), dict) else {}
+            firmware_id = str(
+                (software or {}).get("firmware_version")
+                or device.get("firmware_version")
+                or ""
+            ).strip()
+            streamer = str((software or {}).get("streamer") or streamer).strip()
+
+        content_hash = hashlib.sha256(
+            json.dumps({"config": config_payload, "capabilities": capabilities_payload}, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        recorded_at = int(time.time())
+        result = self.history_store.record_config_snapshot(
+            recorded_at=recorded_at,
+            camera_id=resolved,
+            source=str(source or "manual").strip() or "manual",
+            label=str(label or "").strip(),
+            firmware_id=firmware_id,
+            streamer=streamer,
+            capabilities=capabilities_payload,
+            config=config_payload,
+            content_hash=content_hash,
+            skip_duplicate=True,
+        )
+        detail = (
+            "Config unchanged; kept existing backup"
+            if result.get("skipped_duplicate")
+            else f"Stored config backup #{result.get('snapshot_id')}"
+        )
+        self._record_history_action(
+            resolved,
+            "config_backup",
+            "success",
+            detail,
+            source="hub",
+            payload_summary=json.dumps(
+                {
+                    "snapshot_id": result.get("snapshot_id"),
+                    "source": source,
+                    "skipped_duplicate": bool(result.get("skipped_duplicate")),
+                },
+                sort_keys=True,
+            ),
+        )
+        return {
+            "camera_id": resolved,
+            "status": "success",
+            "status_detail": detail,
+            **result,
+            "recorded_at": recorded_at,
+            "firmware_id": firmware_id,
+            "streamer": streamer,
+            "label": str(label or "").strip(),
+            "source": str(source or "manual").strip() or "manual",
+        }
+
+    def _maybe_backup_camera_config(
+        self,
+        camera_id: str,
+        *,
+        source: str,
+        label: str = "",
+        settle_seconds: float = 0.0,
+    ) -> None:
+        if settle_seconds > 0:
+            time.sleep(float(settle_seconds))
+        try:
+            self.backup_camera_config(camera_id, source=source, label=label)
+        except Exception as error:
+            LOG.info("Config backup skipped for %s: %s", camera_id, error)
+            self._record_history_action(
+                camera_id,
+                "config_backup",
+                "warning",
+                str(error),
+                source="hub",
+            )
+
+    def _schedule_camera_config_backup(
+        self,
+        camera_id: str,
+        *,
+        source: str,
+        label: str = "",
+        settle_seconds: float = 3.0,
+    ) -> None:
+        resolved = self._resolve_camera_id(camera_id) or str(camera_id or "").strip().lower()
+        if not resolved:
+            return
+        thread = threading.Thread(
+            target=self._maybe_backup_camera_config,
+            args=(resolved,),
+            kwargs={"source": source, "label": label, "settle_seconds": settle_seconds},
+            name=f"config-backup-{resolved[:12]}",
+            daemon=True,
+        )
+        thread.start()
+
+    def list_camera_config_backups(self, camera_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        if self.history_store is None:
+            return []
+        rows = self.history_store.list_config_snapshots(resolved, limit=limit)
+        return [self._config_snapshot_summary_for_ui(row) for row in rows]
+
+    def get_camera_config_backup(self, camera_id: str, snapshot_id: int) -> dict[str, Any]:
+        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        if self.history_store is None:
+            raise RuntimeError("History database is disabled")
+        entry = self.history_store.get_config_snapshot(resolved, int(snapshot_id))
+        if entry is None:
+            raise RuntimeError(f"Unknown config backup: {snapshot_id}")
+        return self._config_snapshot_detail_for_ui(entry)
+
+    def delete_camera_config_backup(self, camera_id: str, snapshot_id: int) -> dict[str, Any]:
+        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        if self.history_store is None:
+            raise RuntimeError("History database is disabled")
+        deleted = self.history_store.delete_config_snapshot(resolved, int(snapshot_id))
+        if not deleted:
+            raise RuntimeError(f"Unknown config backup: {snapshot_id}")
+        self._record_history_action(
+            resolved,
+            "config_backup_delete",
+            "success",
+            f"Deleted config backup #{snapshot_id}",
+            source="hub",
+        )
+        return {"camera_id": resolved, "snapshot_id": int(snapshot_id), "deleted": True}
+
+    def preview_camera_config_restore(self, camera_id: str, snapshot_id: int) -> dict[str, Any]:
+        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        with self.state_lock:
+            camera = self.cameras.get(resolved)
+        if camera is None:
+            raise RuntimeError(f"Unknown camera: {camera_id}")
+        if self.history_store is None:
+            raise RuntimeError("History database is disabled")
+        snapshot = self.history_store.get_config_snapshot(resolved, int(snapshot_id))
+        if snapshot is None:
+            raise RuntimeError(f"Unknown config backup: {snapshot_id}")
+
+        live_capabilities: dict[str, Any] = {}
+        live_config: dict[str, Any] = {}
+        if self._camera_api_base_url(camera) and str(camera.api_status or "").strip().lower() != "offline":
+            client = self._camera_api_client(camera)
+            try:
+                caps = client.get_capabilities()
+                if isinstance(caps, dict):
+                    live_capabilities = caps
+            except Exception as error:
+                LOG.debug("Restore preview capabilities failed for %s: %s", resolved, error, exc_info=True)
+            try:
+                cfg = client.get_config()
+                if isinstance(cfg, dict):
+                    live_config = cfg
+            except Exception as error:
+                LOG.debug("Restore preview config failed for %s: %s", resolved, error, exc_info=True)
+
+        plan = self._build_config_restore_plan(
+            snapshot_config=snapshot.get("config") if isinstance(snapshot.get("config"), dict) else {},
+            live_capabilities=live_capabilities,
+            live_config=live_config,
+        )
+        return {
+            "camera_id": resolved,
+            "snapshot": self._config_snapshot_detail_for_ui(snapshot),
+            "live_firmware_id": str(camera.api_version or ""),
+            "live_streamer": str(camera.api_streamer or ""),
+            **plan,
+        }
+
+    def restore_camera_config_backup(
+        self,
+        camera_id: str,
+        snapshot_id: int,
+        *,
+        mode: str = "compatible",
+    ) -> dict[str, Any]:
+        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        normalized_mode = str(mode or "compatible").strip().lower()
+        if normalized_mode not in {"compatible", "best_effort"}:
+            raise RuntimeError("Restore mode must be 'compatible' or 'best_effort'")
+
+        preview = self.preview_camera_config_restore(resolved, int(snapshot_id))
+        payload = preview.get("compatible_payload") if normalized_mode == "compatible" else preview.get("best_effort_payload")
+        if not isinstance(payload, dict) or not payload:
+            raise RuntimeError("Restore plan produced an empty payload")
+
+        result = self.patch_camera_config(resolved, payload, refresh_after=True)
+        self._record_history_action(
+            resolved,
+            "config_restore",
+            "success",
+            f"Restored backup #{snapshot_id} ({normalized_mode})",
+            source="hub",
+            payload_summary=json.dumps(
+                {
+                    "snapshot_id": int(snapshot_id),
+                    "mode": normalized_mode,
+                    "compatible_count": len(preview.get("compatible") or []),
+                    "dropped_count": len(preview.get("dropped") or []),
+                    "conflict_count": len(preview.get("conflicts") or []),
+                    "skipped_secrets_count": len(preview.get("skipped_secrets") or []),
+                },
+                sort_keys=True,
+            ),
+        )
+        try:
+            self.backup_camera_config(resolved, source="hub_write", label=f"After restore of #{snapshot_id}")
+        except Exception:
+            LOG.debug("Post-restore backup failed for %s", resolved, exc_info=True)
+        return {
+            "camera_id": resolved,
+            "snapshot_id": int(snapshot_id),
+            "mode": normalized_mode,
+            "status": "success",
+            "status_detail": f"Restored backup #{snapshot_id} using {normalized_mode} mode",
+            "preview": preview,
+            "apply_result": result,
+        }
+
+    def get_camera_config_backups_for_ui(self, camera_id: str) -> dict[str, Any]:
+        camera = self.get_camera_for_ui(camera_id)
+        resolved = str(camera.get("camera_id") or camera_id).strip().lower()
+        backups = self.list_camera_config_backups(resolved, limit=50)
+        last_attempt: dict[str, Any] | None = None
+        if self.history_store is not None:
+            for row in self.history_store.recent_action_events(resolved, 40, sources=["hub"]):
+                if str(row.get("action") or "") != "config_backup":
+                    continue
+                recorded_at = self._coerce_int(row.get("recorded_at"))
+                last_attempt = {
+                    "status": str(row.get("status") or ""),
+                    "detail": str(row.get("detail") or ""),
+                    "recorded_at": recorded_at,
+                    "recorded_at_label": self._format_timestamp(recorded_at) if recorded_at else "",
+                }
+                break
+        return {
+            **camera,
+            "config_backups": backups,
+            "config_backup_count": len(backups),
+            "latest_config_backup": backups[0] if backups else None,
+            "last_config_backup_attempt": last_attempt,
+            "history_enabled": self.history_store is not None,
+            "history_db_path": self.history_db_path,
+            "history_max_config_snapshots_per_camera": self.history_max_config_snapshots_per_camera,
+            "history_config_snapshot_max_age_days": self.history_config_snapshot_max_age_days,
+        }
+
+    def _config_snapshot_summary_for_ui(self, row: dict[str, Any]) -> dict[str, Any]:
+        recorded_at = self._coerce_int(row.get("recorded_at"))
+        return {
+            "snapshot_id": int(row.get("id") or 0),
+            "recorded_at": recorded_at,
+            "recorded_at_label": self._format_timestamp(recorded_at) if recorded_at else "",
+            "source": str(row.get("source") or ""),
+            "label": str(row.get("label") or ""),
+            "firmware_id": str(row.get("firmware_id") or ""),
+            "streamer": str(row.get("streamer") or ""),
+            "content_hash": str(row.get("content_hash") or ""),
+            "config_bytes": int(row.get("config_bytes") or 0),
+            "capabilities_bytes": int(row.get("capabilities_bytes") or 0),
+        }
+
+    def _config_snapshot_detail_for_ui(self, entry: dict[str, Any]) -> dict[str, Any]:
+        summary = self._config_snapshot_summary_for_ui(
+            {
+                "id": entry.get("id"),
+                "recorded_at": entry.get("recorded_at"),
+                "source": entry.get("source"),
+                "label": entry.get("label"),
+                "firmware_id": entry.get("firmware_id"),
+                "streamer": entry.get("streamer"),
+                "content_hash": entry.get("content_hash"),
+                "config_bytes": len(json.dumps(entry.get("config") or {}, sort_keys=True)),
+                "capabilities_bytes": len(json.dumps(entry.get("capabilities") or {}, sort_keys=True)),
+            }
+        )
+        return {
+            **summary,
+            "config": entry.get("config") if isinstance(entry.get("config"), dict) else {},
+            "capabilities": entry.get("capabilities") if isinstance(entry.get("capabilities"), dict) else {},
+        }
+
+    def _build_config_restore_plan(
+        self,
+        *,
+        snapshot_config: dict[str, Any],
+        live_capabilities: dict[str, Any],
+        live_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        skipped_secrets: list[dict[str, str]] = []
+        compatible: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        compatible_payload: dict[str, Any] = {}
+        best_effort_payload: dict[str, Any] = {}
+
+        cleaned, secret_paths = self._strip_restore_secrets(snapshot_config)
+        for path in secret_paths:
+            skipped_secrets.append({"path": path, "reason": "Pairing/secret field is owned by hub enrollment"})
+
+        known_groups = self._restorable_config_groups()
+        capability_groups = {
+            str(key).strip().lower()
+            for key in live_capabilities.keys()
+            if str(key).strip()
+        }
+        # Streams live under "streams" in capabilities but stream0/stream1 in config.
+        if "streams" in capability_groups or "stream" in capability_groups:
+            capability_groups.update({"stream0", "stream1", "stream2", "stream3"})
+
+        for key, value in cleaned.items():
+            path = str(key)
+            group = self._restore_capability_group_for_key(path)
+            peelable = path in known_groups or bool(re.fullmatch(r"stream\d+", path))
+            caps_ok = (not capability_groups) or (group in capability_groups) or (path in capability_groups)
+
+            conflict = self._restore_value_conflict(path, value, live_capabilities, live_config)
+            entry = {
+                "path": path,
+                "group": group,
+                "summary": self._restore_value_summary(value),
+            }
+            if conflict:
+                conflicts.append({**entry, "reason": conflict})
+                if peelable:
+                    # Still offer in best-effort when the peel map can express it.
+                    best_effort_payload[path] = value
+                continue
+            if caps_ok or peelable:
+                compatible.append(entry)
+                compatible_payload[path] = value
+                best_effort_payload[path] = value
+            elif peelable:
+                dropped.append({**entry, "reason": "Not advertised by live capabilities; peelable in best-effort mode"})
+                best_effort_payload[path] = value
+            else:
+                dropped.append({**entry, "reason": "No matching live capability and not in restore map"})
+
+        return {
+            "compatible": compatible,
+            "dropped": dropped,
+            "conflicts": conflicts,
+            "skipped_secrets": skipped_secrets,
+            "compatible_payload": compatible_payload,
+            "best_effort_payload": best_effort_payload,
+            "compatible_count": len(compatible),
+            "dropped_count": len(dropped),
+            "conflict_count": len(conflicts),
+            "skipped_secrets_count": len(skipped_secrets),
+        }
+
+    def _restorable_config_groups(self) -> set[str]:
+        return {
+            "image",
+            "motion",
+            "daynight",
+            "audio",
+            "privacy",
+            "recording",
+            "sensor",
+            "isp",
+            "stream0",
+            "stream1",
+            "stream2",
+            "stream3",
+        }
+
+    def _restore_capability_group_for_key(self, key: str) -> str:
+        normalized = str(key or "").strip().lower()
+        if re.fullmatch(r"stream\d+", normalized):
+            return "streams"
+        if normalized in {"image", "motion", "daynight", "audio", "privacy", "recording", "sensor", "isp", "send2"}:
+            return normalized
+        return normalized
+
+    def _strip_restore_secrets(self, config: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        secret_paths: list[str] = []
+        cleaned = copy.deepcopy(config)
+
+        def walk(node: Any, prefix: str) -> Any:
+            if isinstance(node, dict):
+                out: dict[str, Any] = {}
+                for key, value in node.items():
+                    path = f"{prefix}.{key}" if prefix else str(key)
+                    key_l = str(key).strip().lower()
+                    if prefix == "" and key_l == "agent":
+                        secret_paths.append(path)
+                        continue
+                    if key_l in {"token", "password", "api_token", "api_key", "secret"}:
+                        secret_paths.append(path)
+                        continue
+                    if key_l in {"username", "user"} and prefix.split(".")[0] in {"mqtt_sub", "mqtt"}:
+                        # Keep username; password already stripped above when present.
+                        out[key] = walk(value, path)
+                        continue
+                    out[key] = walk(value, path)
+                return out
+            if isinstance(node, list):
+                return [walk(item, f"{prefix}[]") for item in node]
+            return node
+
+        return walk(cleaned, ""), secret_paths
+
+    def _restore_value_conflict(
+        self,
+        path: str,
+        value: Any,
+        live_capabilities: dict[str, Any],
+        live_config: dict[str, Any],
+    ) -> str:
+        group = self._restore_capability_group_for_key(path)
+        caps = live_capabilities.get(group)
+        if isinstance(caps, dict):
+            # Common shape: {"fields": {"format": {"enum": [...]}}} or {"format": {"values": [...]}}
+            fields = caps.get("fields") if isinstance(caps.get("fields"), dict) else caps
+            if isinstance(value, dict) and isinstance(fields, dict):
+                for field_name, field_value in value.items():
+                    field_cap = fields.get(field_name)
+                    if not isinstance(field_cap, dict):
+                        continue
+                    allowed = field_cap.get("enum") or field_cap.get("values") or field_cap.get("allowed")
+                    if isinstance(allowed, list) and allowed and field_value not in allowed:
+                        return f"{path}.{field_name}={field_value!r} not in allowed {allowed!r}"
+        # Type mismatch vs live config leaf.
+        live_value = live_config.get(path) if isinstance(live_config, dict) else None
+        if live_value is not None and type(live_value) is not type(value) and not (
+            isinstance(live_value, (int, float)) and isinstance(value, (int, float))
+        ):
+            if isinstance(live_value, dict) != isinstance(value, dict):
+                return f"{path} shape mismatch: backup is {type(value).__name__}, live is {type(live_value).__name__}"
+        return ""
+
+    def _restore_value_summary(self, value: Any) -> str:
+        if isinstance(value, dict):
+            return f"object({len(value)} keys)"
+        if isinstance(value, list):
+            return f"list({len(value)} items)"
+        text = str(value)
+        return text if len(text) <= 80 else text[:77] + "..."
 
     def _is_timeout_error(self, error: Exception) -> bool:
         message = str(error or "").strip().lower()
@@ -4892,7 +5605,12 @@ class Hub:
             "save_entry": save_entry,
         }
 
-    def install_pairing_bundle_via_mqtt(self, enrollment: dict[str, str]) -> dict[str, Any]:
+    def install_pairing_bundle_via_mqtt(
+        self,
+        enrollment: dict[str, str],
+        *,
+        backup_before: bool = True,
+    ) -> dict[str, Any]:
         bundle = self.generate_pairing_bundle(enrollment)
         camera_id = str(bundle.get("camera_id") or "").strip().lower()
         resolved = self._resolve_camera_id(camera_id) or camera_id
@@ -4919,6 +5637,11 @@ class Hub:
         mqtt_port = str(int(mqtt_cfg.get("port") or 1883))
         mqtt_username = str(mqtt_cfg.get("username") or "").strip()
         mqtt_password = str(mqtt_cfg.get("password") or "")
+
+        with self.state_lock:
+            api_online = str(camera.api_status or "").strip().lower() == "online"
+        if api_online and backup_before:
+            self._schedule_camera_config_backup(resolved, source="pre_pair", label="Before repair pairing")
 
         publish_result = self._publish_camera_command(
             resolved,
@@ -4984,6 +5707,10 @@ class Hub:
         if status == "success":
             self._refresh_camera_state_after_pairing(resolved)
 
+        latest_backup = None
+        if self.history_store is not None:
+            latest_backup = self.history_store.latest_config_snapshot_summary(resolved)
+
         return {
             **bundle,
             "status": status,
@@ -4996,6 +5723,8 @@ class Hub:
                 "reply_text": reply_text,
                 "request_id": publish_result.get("request_id") or "",
             },
+            "config_restore_available": latest_backup is not None,
+            "latest_config_backup": self._config_snapshot_summary_for_ui(latest_backup) if latest_backup else None,
         }
 
     def _confirm_pairing_install_via_api(self, camera_id: str, bundle: dict[str, Any]) -> bool:
@@ -5311,6 +6040,8 @@ class Hub:
             "history_recent_actions_limit": self.history_recent_actions_limit,
             "history_max_action_events_per_camera": self.history_max_action_events_per_camera,
             "history_max_state_samples_per_camera": self.history_max_state_samples_per_camera,
+            "history_max_config_snapshots_per_camera": self.history_max_config_snapshots_per_camera,
+            "history_config_snapshot_max_age_days": self.history_config_snapshot_max_age_days,
             "last_reload_at": self._format_timestamp(self.last_reload_at),
             **self._api_summary(),
             **self._onvif_summary(),
@@ -5512,6 +6243,24 @@ class Hub:
             "default_onvif_username": self.default_onvif_username,
             "default_onvif_password": self.default_onvif_password,
             "can_delete": True,
+            **self._camera_config_backup_prompt_for_ui(resolved, is_paired=is_paired),
+        }
+
+    def _camera_config_backup_prompt_for_ui(self, camera_id: str, *, is_paired: bool) -> dict[str, Any]:
+        if self.history_store is None:
+            return {
+                "config_restore_available": False,
+                "latest_config_backup": None,
+            }
+        latest = self.history_store.latest_config_snapshot_summary(camera_id)
+        if latest is None:
+            return {
+                "config_restore_available": False,
+                "latest_config_backup": None,
+            }
+        return {
+            "config_restore_available": bool(is_paired),
+            "latest_config_backup": self._config_snapshot_summary_for_ui(latest),
         }
 
     def _camera_image_id_for_ui(self, camera: Camera) -> str:

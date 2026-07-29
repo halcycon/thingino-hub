@@ -21,6 +21,7 @@ exec podman run --rm --replace -d \
   --name thinginohub \
   -p 8080:8080 \
   --env HUB_STATE_PATH=/data/camera-state.yaml \
+  --env HUB_HISTORY_DB=/data/hub-history.sqlite3 \
   --env HUB_UI_HOST=0.0.0.0 \
   --env HUB_UI_PORT=8080 \
   --env HUB_UI_USERNAME="$UI_USERNAME" \

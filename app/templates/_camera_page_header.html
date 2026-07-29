@@ -41,6 +41,7 @@
     <a class="btn btn-sm {{ 'btn-primary' if page_key == 'native-actions' else 'btn-outline-secondary' }}" href="{{ url_for('camera_native_actions', camera_id=camera.camera_id) }}">Native Actions</a>
   {% endif %}
     <a class="btn btn-sm {{ 'btn-primary' if page_key == 'history' else 'btn-outline-secondary' }}" href="{{ url_for('camera_history', camera_id=camera.camera_id) }}">History</a>
+    <a class="btn btn-sm {{ 'btn-primary' if page_key == 'config-backups' else 'btn-outline-secondary' }}" href="{{ url_for('camera_config_backups', camera_id=camera.camera_id) }}">Config Backups</a>
   {% if ui_has_expert_access %}
     <a class="btn btn-sm {{ 'btn-danger' if page_key == 'expert' else 'btn-outline-danger' }}" href="{{ url_for('camera_expert_config', camera_id=camera.camera_id) }}">Expert Config</a>
   {% endif %}
@@ -105,10 +106,17 @@
       {% elif setup_status == 'verifying' %}
       <p class="small text-body-secondary mb-0">Verifying MQTT command capability. The camera registered with the broker; the hub is probing whether it answers commands before showing Connect{% if registered_on_hub %} / Pair{% endif %}. This usually settles within a few seconds — refresh if it sticks.</p>
       {% elif setup_status == 'pair' %}
-      <form action="{{ url_for('pair_camera', camera_id=camera.camera_id) }}" method="post" class="d-flex flex-wrap gap-2 align-items-center">
+      <form action="{{ url_for('pair_camera', camera_id=camera.camera_id) }}" method="post" class="d-flex flex-column gap-2">
         <input type="hidden" name="redirect_page" value="{{ page_key }}">
-        <button class="btn btn-primary" type="submit">Install Pairing Bundle</button>
-        <span class="small text-body-secondary">Installs the pairing bundle over MQTT and asks the camera to restart its hub agent.</span>
+        <input type="hidden" name="backup_before_present" value="1">
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+          <button class="btn btn-primary" type="submit">Install Pairing Bundle</button>
+          <span class="small text-body-secondary">Installs the pairing bundle over MQTT and asks the camera to restart its hub agent.</span>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" name="backup_before" id="pair_backup_before" value="on" checked {% if camera.api_status != 'online' %}disabled{% endif %}>
+          <label class="form-check-label small" for="pair_backup_before">Backup config first when native API is online</label>
+        </div>
       </form>
       {% endif %}
     </div>

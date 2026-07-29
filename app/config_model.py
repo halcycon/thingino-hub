@@ -24,6 +24,8 @@ def load_config_dict(config: dict[str, Any]) -> dict[str, Any]:
     config["history"].setdefault("recent_actions_limit", 20)
     config["history"].setdefault("max_action_events_per_camera", 1000)
     config["history"].setdefault("max_state_samples_per_camera", 5000)
+    config["history"].setdefault("max_config_snapshots_per_camera", 20)
+    config["history"].setdefault("config_snapshot_max_age_days", 90)
     config["pairing"].setdefault("auto_install_on_registration", True)
     config["pairing"].setdefault("auto_install_retry_seconds", 300)
     if not config["telegram"].get("token"):

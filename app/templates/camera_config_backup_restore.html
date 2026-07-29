@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block content %}
+  {% set page_key = 'config-backups' %}
+  {% set page_label = 'Restore Config Backup' %}
+  {% set page_meta = camera.camera_id ~ ' / #' ~ preview.snapshot.snapshot_id %}
+  {% include '_camera_page_header.html' %}
+
+  <section class="card shadow-sm mb-4">
+    <div class="card-body">
+      <div class="d-flex flex-column flex-md-row justify-content-between gap-3 mb-3">
+        <div>
+          <h2 class="h4 mb-1">Restore preview</h2>
+          <p class="text-body-secondary mb-0">
+            Backup from {{ preview.snapshot.recorded_at_label }}
+            ({{ preview.snapshot.firmware_id or 'unknown firmware' }} / {{ preview.snapshot.streamer or 'unknown streamer' }})
+            compared to the live camera
+            ({{ preview.live_streamer or camera.api_streamer or 'unknown streamer' }}).
+          </p>
+        </div>
+        <a class="btn btn-outline-secondary align-self-start" href="{{ url_for('camera_config_backups', camera_id=camera.camera_id) }}">Cancel</a>
+      </div>
+
+      <div class="row g-3 mb-4">
+        <div class="col-6 col-md-3"><div class="border rounded p-3"><div class="small text-body-secondary">Compatible</div><div class="h4 mb-0">{{ preview.compatible_count }}</div></div></div>
+        <div class="col-6 col-md-3"><div class="border rounded p-3"><div class="small text-body-secondary">Dropped</div><div class="h4 mb-0">{{ preview.dropped_count }}</div></div></div>
+        <div class="col-6 col-md-3"><div class="border rounded p-3"><div class="small text-body-secondary">Conflicts</div><div class="h4 mb-0">{{ preview.conflict_count }}</div></div></div>
+        <div class="col-6 col-md-3"><div class="border rounded p-3"><div class="small text-body-secondary">Secrets skipped</div><div class="h4 mb-0">{{ preview.skipped_secrets_count }}</div></div></div>
+      </div>
+
+      {% if preview.skipped_secrets %}
+      <h3 class="h6">Skipped secrets / pairing</h3>
+      <ul class="small mb-4">
+        {% for item in preview.skipped_secrets %}
+          <li><span class="font-monospace">{{ item.path }}</span> — {{ item.reason }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+
+      {% if preview.conflicts %}
+      <h3 class="h6">Shape / enum conflicts</h3>
+      <ul class="small mb-4">
+        {% for item in preview.conflicts %}
+          <li><span class="font-monospace">{{ item.path }}</span> — {{ item.reason }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+
+      {% if preview.dropped %}
+      <h3 class="h6">Dropped without matching capability</h3>
+      <ul class="small mb-4">
+        {% for item in preview.dropped %}
+          <li><span class="font-monospace">{{ item.path }}</span> — {{ item.reason }} ({{ item.summary }})</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+
+      {% if preview.compatible %}
+      <h3 class="h6">Compatible paths</h3>
+      <ul class="small mb-4">
+        {% for item in preview.compatible %}
+          <li><span class="font-monospace">{{ item.path }}</span> — {{ item.summary }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+
+      <form method="post" action="{{ url_for('camera_config_backup_restore', camera_id=camera.camera_id, snapshot_id=preview.snapshot.snapshot_id) }}" class="d-flex flex-wrap gap-2">
+        <button class="btn btn-primary" type="submit" name="mode" value="compatible" {% if not preview.compatible_count %}disabled{% endif %}>
+          Apply compatible only
+        </button>
+        <button class="btn btn-outline-warning" type="submit" name="mode" value="best_effort" {% if not preview.best_effort_payload %}disabled{% endif %}
+          onclick="return confirm('Best-effort restore may push fields the live firmware does not advertise. Continue?');">
+          Best effort
+        </button>
+      </form>
+    </div>
+  </section>
+{% endblock %}

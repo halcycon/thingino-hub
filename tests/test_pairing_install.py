@@ -157,8 +157,11 @@ class PairingInstallTests(unittest.TestCase):
         hub.static_camera_ids = set()
         hub.config = {"mqtt": {"host": "192.168.1.10", "port": 1883, "username": "", "password": ""}}
         hub.command_reply_timeout_seconds = 5.0
+        hub.history_store = None
         hub._persist_state = lambda: None
         hub._camera_accepts_hub_commands = lambda *args, **kwargs: True
+        hub._schedule_camera_config_backup = lambda *args, **kwargs: None
+        hub._refresh_camera_state_after_pairing = lambda *args, **kwargs: None
 
         saved_enrollments: list[dict[str, str]] = []
         history_actions: list[tuple[str, str, str, str]] = []
@@ -199,6 +202,7 @@ class PairingInstallTests(unittest.TestCase):
         self.assertEqual(saved_enrollments[0]["api_token"], "generated-token")
         self.assertEqual(saved_enrollments[0]["api_base_url"], "https://192.168.1.2:1998/api/v1")
         self.assertEqual(history_actions[-1], ("cam1", "pairing_install", "success", "Agent bootstrap installed"))
+        self.assertFalse(result.get("config_restore_available"))
 
     def test_timed_out_mqtt_install_does_not_persist_generated_enrollment(self) -> None:
         hub = object.__new__(Hub)
@@ -207,8 +211,11 @@ class PairingInstallTests(unittest.TestCase):
         hub.static_camera_ids = set()
         hub.config = {"mqtt": {"host": "192.168.1.10", "port": 1883, "username": "", "password": ""}}
         hub.command_reply_timeout_seconds = 5.0
+        hub.history_store = None
         hub._persist_state = lambda: None
         hub._camera_accepts_hub_commands = lambda *args, **kwargs: True
+        hub._schedule_camera_config_backup = lambda *args, **kwargs: None
+        hub._confirm_pairing_install_via_api = lambda *args, **kwargs: False
 
         saved_enrollments: list[dict[str, str]] = []
 
@@ -240,6 +247,7 @@ class PairingInstallTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "warning")
         self.assertEqual(saved_enrollments, [])
+        self.assertFalse(result.get("config_restore_available"))
 
 
 class StreamControlFormattingTests(unittest.TestCase):
@@ -657,7 +665,8 @@ class NativeConfigSettingsSplitTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(residual, {"image": {"brightness": 128}})
+        self.assertEqual(residual, {})
+        self.assertIn(("image/brightness", {"brightness": 128}), patches)
         self.assertIn(("streams/0/fps", {"fps": 25}), patches)
         self.assertIn(("streams/0/osd/enabled", {"enabled": True}), patches)
         self.assertIn(("streams/0/osd/time/enabled", {"enabled": True}), patches)
@@ -687,19 +696,27 @@ class NativeConfigSettingsSplitTests(unittest.TestCase):
         hub._record_optimistic_supported_controls = lambda *args, **kwargs: None
         hub._schedule_api_refresh = lambda camera_id: False
         hub._schedule_supported_controls_refresh = lambda camera_id: False
+        hub._schedule_camera_config_backup = lambda *args, **kwargs: None
 
         result = Hub.patch_camera_config(
             hub,
             "cam1",
             {
                 "stream0": {"osd": {"usertext": {"format": "Bird Box 01"}}},
+                "image": {"anti_flicker": "1"},
                 "action": {"restart_thread": 3},
             },
             refresh_after=False,
         )
 
         self.assertEqual(result["status"], "accepted")
-        self.assertEqual(calls, [("setting", "streams/0/osd/usertext/format", {"format": "Bird Box 01"})])
+        self.assertEqual(
+            calls,
+            [
+                ("setting", "image/anti-flicker", {"anti_flicker": "1"}),
+                ("setting", "streams/0/osd/usertext/format", {"format": "Bird Box 01"}),
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -45,8 +45,9 @@ class CameraApiClient:
             raise CameraApiError("Runtime resource is required")
         return self._json_request("GET", f"/runtime/{normalized}")
 
-    def get_config(self) -> dict[str, Any]:
-        return self._json_request("GET", "/config")
+    def get_config(self, timeout: int | None = None) -> dict[str, Any]:
+        # Full config reads are often slower than narrow /settings leaves.
+        return self._json_request("GET", "/config", timeout=self.timeout if timeout is None else timeout)
 
     def patch_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._json_request("PATCH", "/config", payload=payload, timeout=self._control_timeout())

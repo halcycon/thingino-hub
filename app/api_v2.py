@@ -100,6 +100,19 @@ class BulkActionRequest(BaseModel):
     action: str
 
 
+class PairCameraRequest(BaseModel):
+    backup_before: bool = True
+
+
+class ConfigBackupCreateRequest(BaseModel):
+    label: str = "Manual backup"
+    source: str = "manual"
+
+
+class ConfigRestoreRequest(BaseModel):
+    mode: Literal["compatible", "best_effort"] = "compatible"
+
+
 def _camera_teaser_payload(camera: dict[str, Any]) -> dict[str, Any]:
     return {
         "camera_id": str(camera.get("camera_id") or ""),
@@ -495,24 +508,80 @@ def create_api_v2_app(hub: "Hub") -> FastAPI:
         }
 
     @app.post("/api/v2/cameras/{camera_id}/pair", response_model=CameraServiceActionResponse)
-    def api_v2_pair_camera(camera_id: str) -> CameraServiceActionResponse:
+    def api_v2_pair_camera(camera_id: str, request: PairCameraRequest = PairCameraRequest()) -> CameraServiceActionResponse:
         try:
             camera = hub.get_camera_for_ui(camera_id)
             enrollment = {
                 "camera_id": camera_id,
                 "ip": str(camera.get("ip") or "").strip(),
             }
-            result = hub.install_pairing_bundle_via_mqtt(enrollment)
+            backup_before = bool(request.backup_before)
+            result = hub.install_pairing_bundle_via_mqtt(enrollment, backup_before=backup_before)
             outcome = pairing_outcome(camera_id, result)
+            message = str(outcome["message"])
+            if result.get("config_restore_available"):
+                message = f"{message} Config backup available — review restore from Config Backups."
             return _camera_mutation_response(
                 camera_id=camera_id,
                 action="pair",
                 result=str(outcome["result"]),
-                message=str(outcome["message"]),
+                message=message,
                 details=result,
             )
         except Exception as error:
             raise HTTPException(status_code=500, detail=f"Pairing failed for {camera_id}: {error}") from error
+
+    @app.get("/api/v2/cameras/{camera_id}/config-backups")
+    def api_v2_list_config_backups(camera_id: str, limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+        try:
+            backups = hub.list_camera_config_backups(camera_id, limit=limit)
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "camera_id": camera_id, "backups": backups, "count": len(backups)}
+
+    @app.post("/api/v2/cameras/{camera_id}/config-backups")
+    def api_v2_create_config_backup(camera_id: str, request: ConfigBackupCreateRequest) -> dict[str, Any]:
+        try:
+            result = hub.backup_camera_config(
+                camera_id,
+                source=str(request.source or "manual"),
+                label=str(request.label or "Manual backup"),
+            )
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "message": str(result.get("status_detail") or "Config backup stored."), "result": result}
+
+    @app.get("/api/v2/cameras/{camera_id}/config-backups/{snapshot_id}")
+    def api_v2_get_config_backup(camera_id: str, snapshot_id: int) -> dict[str, Any]:
+        try:
+            backup = hub.get_camera_config_backup(camera_id, snapshot_id)
+        except Exception as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"ok": True, "backup": backup}
+
+    @app.post("/api/v2/cameras/{camera_id}/config-backups/{snapshot_id}/restore-preview")
+    def api_v2_restore_preview(camera_id: str, snapshot_id: int) -> dict[str, Any]:
+        try:
+            preview = hub.preview_camera_config_restore(camera_id, snapshot_id)
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "preview": preview}
+
+    @app.post("/api/v2/cameras/{camera_id}/config-backups/{snapshot_id}/restore")
+    def api_v2_restore_config_backup(camera_id: str, snapshot_id: int, request: ConfigRestoreRequest) -> dict[str, Any]:
+        try:
+            result = hub.restore_camera_config_backup(camera_id, snapshot_id, mode=request.mode)
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "message": str(result.get("status_detail") or "Config restore finished."), "result": result}
+
+    @app.delete("/api/v2/cameras/{camera_id}/config-backups/{snapshot_id}")
+    def api_v2_delete_config_backup(camera_id: str, snapshot_id: int) -> dict[str, Any]:
+        try:
+            result = hub.delete_camera_config_backup(camera_id, snapshot_id)
+        except Exception as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"ok": True, "message": f"Deleted config backup #{snapshot_id}.", "result": result}
 
     @app.post("/api/v2/cameras/{camera_id}/delete")
     def api_v2_delete_camera(camera_id: str) -> dict[str, Any]:

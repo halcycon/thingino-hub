@@ -89,6 +89,9 @@
             : "Use the commands below on the camera.";
           const installBadgeClass = status === "warning" ? "text-bg-warning" : "text-bg-success";
           const installLabel = mqtt.published ? "MQTT install" : "Pairing bundle";
+          const restoreHint = result.config_restore_available
+            ? `<div class="alert alert-info py-2 small mt-3 mb-0">A config backup is available. Open the camera’s <strong>Config Backups</strong> page to review and restore streamer/OSD settings after pairing.</div>`
+            : "";
           enrollPairingResult.classList.remove("d-none", "border-danger", "border-success", "border-warning");
           enrollPairingResult.classList.add(borderClass);
           enrollPairingResult.innerHTML = `
@@ -103,6 +106,7 @@
               <span class="badge ${installBadgeClass}">${installLabel}</span>
               <span class="text-body-secondary">${installSummary}</span>
             </div>
+            ${restoreHint}
             <div class="row g-3 small">
               <div class="col-12 col-lg-6">
                 <div class="fw-semibold mb-1">Generated token</div>

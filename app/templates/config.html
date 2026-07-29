@@ -184,8 +184,16 @@
               <label class="form-label">Max state samples per camera</label>
               <input class="form-control" type="number" min="1" name="history_max_state_samples_per_camera" value="{{ config.history.max_state_samples_per_camera }}">
             </div>
+            <div class="col-12 col-md-3">
+              <label class="form-label">Max config backups per camera</label>
+              <input class="form-control" type="number" min="1" name="history_max_config_snapshots_per_camera" value="{{ config.history.max_config_snapshots_per_camera | default(20) }}">
+            </div>
+            <div class="col-12 col-md-3">
+              <label class="form-label">Config backup max age (days)</label>
+              <input class="form-control" type="number" min="0" name="history_config_snapshot_max_age_days" value="{{ config.history.config_snapshot_max_age_days | default(90) }}">
+            </div>
           </div>
-          <p class="small text-body-secondary mt-2">History is written to a local SQLite database after native actions and probe results. Leave the path empty to use the default database next to the hub config file. Per-camera retention caps trim the oldest rows after inserts so the store stays bounded. This store is for analysis and timelines; live camera control does not read desired state from it.</p>
+          <p class="small text-body-secondary mt-2">History is written to a local SQLite database after native actions and probe results. Leave the path empty to use the default database next to the hub config file. Per-camera retention caps trim the oldest rows after inserts so the store stays bounded. Config backups are recoverable snapshots for explicit restore after reflash or unwanted changes; live camera control does not read desired state from them. Set backup max age to 0 to retain by count only.</p>
         </section>
 
         <section class="mb-4">
