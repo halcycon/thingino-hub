@@ -5268,6 +5268,29 @@ class Hub:
         with config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config, handle, sort_keys=False)
 
+    def set_config_document(self, config: dict[str, Any]) -> None:
+        """Update the in-memory config document without reconnecting MQTT/Telegram.
+
+        Used by Configuration → Save so the form and UI access checks reflect what
+        was written to disk. Service connections still require Save and Reload.
+        """
+        normalized = load_config_dict(copy.deepcopy(config))
+        with self.state_lock:
+            self.config = normalized
+            ui_cfg = normalized.get("ui") or {}
+            defaults_cfg = normalized.get("defaults") or {}
+            pairing_cfg = normalized.get("pairing") or {}
+            self.registration_stale_after_seconds = max(0, int(ui_cfg.get("registration_stale_after_seconds", 0)))
+            self.snapshot_heartbeat_interval_seconds = max(0, int(ui_cfg.get("snapshot_heartbeat_interval_seconds", 60)))
+            self.snapshot_heartbeat_timeout_seconds = max(1, int(ui_cfg.get("snapshot_heartbeat_timeout_seconds", 5)))
+            self.api_probe_interval_seconds = max(0, int(ui_cfg.get("api_probe_interval_seconds", 300)))
+            self.snapshot_cache_stale_after_seconds = max(0, int(ui_cfg.get("snapshot_cache_stale_after_seconds", 3600)))
+            self.default_onvif_username = str(defaults_cfg.get("onvif_username") or DEFAULT_THINGINO_USERNAME).strip()
+            self.default_onvif_password = str(defaults_cfg.get("onvif_password") or DEFAULT_THINGINO_PASSWORD)
+            self.auto_pairing_enabled = bool(pairing_cfg.get("auto_install_on_registration", True))
+            self.auto_pairing_retry_seconds = max(0, int(pairing_cfg.get("auto_install_retry_seconds", 300)))
+            self._configure_history_store(normalized)
+
     def reload_config(self) -> None:
         config = load_config(self.config_path)
         self._apply_config(config)

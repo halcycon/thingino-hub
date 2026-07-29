@@ -1034,12 +1034,16 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
     def config_editor() -> str | Response:
         if request.method == "POST":
             try:
-                new_config = _config_from_form(request.form)
+                existing = hub.export_config()
+                new_config = _config_from_form(request.form, existing=existing)
                 hub.save_config(new_config)
                 if request.form.get("action") == "save-reload":
                     hub.reload_config()
                     flash("Configuration saved and reloaded.", "success")
                 else:
+                    # Keep MQTT/Telegram sockets up, but sync the document so the
+                    # form does not snap back to pre-save in-memory values.
+                    hub.set_config_document(new_config)
                     flash("Configuration saved.", "success")
                 return redirect(url_for("config_editor"))
             except Exception as error:
@@ -2446,7 +2450,11 @@ def _split_hex_color_alpha(raw_value: Any) -> tuple[str, str]:
     return "#000000", "255"
 
 
-def _config_from_form(form: Any, allow_partial: bool = False) -> dict[str, Any]:
+def _config_from_form(
+    form: Any,
+    allow_partial: bool = False,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     config = {
         "telegram": {
             "token": form.get("telegram_token", "").strip(),
@@ -2480,6 +2488,21 @@ def _config_from_form(form: Any, allow_partial: bool = False) -> dict[str, Any]:
             "snapshot_cache_stale_after_seconds": _int_value(form.get("ui_snapshot_cache_stale_after_seconds"), 3600),
             "api_probe_interval_seconds": _int_value(form.get("ui_api_probe_interval_seconds"), 0),
         },
+        "defaults": {
+            "onvif_username": str(form.get("defaults_onvif_username") or "thingino").strip(),
+            "onvif_password": str(form.get("defaults_onvif_password") or "thingino"),
+        },
+        "pairing": {
+            "auto_install_on_registration": (
+                form.get("pairing_auto_install_on_registration") == "on"
+                if "pairing_auto_install_on_registration_present" in form
+                else bool((existing or {}).get("pairing", {}).get("auto_install_on_registration", True))
+            ),
+            "auto_install_retry_seconds": _int_value(
+                form.get("pairing_auto_install_retry_seconds"),
+                int((existing or {}).get("pairing", {}).get("auto_install_retry_seconds", 300) or 300),
+            ),
+        },
         "history": {
             "enabled": form.get("history_enabled") == "on",
             "path": form.get("history_path", "").strip(),
@@ -2489,6 +2512,12 @@ def _config_from_form(form: Any, allow_partial: bool = False) -> dict[str, Any]:
         },
         "cameras": _load_cameras_yaml(form.get("cameras_yaml", "")),
     }
+
+    # Preserve unknown top-level keys the form does not edit (future-proofing).
+    if existing:
+        for key, value in existing.items():
+            if key not in config:
+                config[key] = copy.deepcopy(value)
 
     if allow_partial:
         return config

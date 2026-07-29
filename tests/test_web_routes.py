@@ -342,9 +342,14 @@ class FakeHub:
 
     def save_config(self, config):
         self.saved_config = config
+        self.config = config
+
+    def set_config_document(self, config):
+        self.config = config
 
     def reload_config(self):
         self.reload_called = True
+
     def update_camera_override(self, camera_id: str, override: dict[str, str]) -> None:
         if camera_id != "cam1":
             raise RuntimeError("Unknown camera")
@@ -1656,6 +1661,11 @@ class WebRouteTests(unittest.TestCase):
                 "ui_api_probe_interval_seconds": "0",
                 "ui_snapshot_heartbeat_timeout_seconds": "5",
                 "ui_snapshot_cache_stale_after_seconds": "3600",
+                "defaults_onvif_username": "thingino",
+                "defaults_onvif_password": "thingino",
+                "pairing_auto_install_on_registration_present": "1",
+                "pairing_auto_install_on_registration": "on",
+                "pairing_auto_install_retry_seconds": "300",
                 "history_path": "",
                 "history_recent_actions_limit": "20",
                 "history_max_action_events_per_camera": "1000",
@@ -1670,6 +1680,11 @@ class WebRouteTests(unittest.TestCase):
         self.assertEqual(response.headers["Location"], "/config")
         self.assertIsNotNone(self.hub.saved_config)
         self.assertEqual(self.hub.saved_config["ui"]["competency_level"], "expert")
+        self.assertEqual(self.hub.config["ui"]["competency_level"], "expert")
+
+        follow = self.client.get("/config")
+        self.assertEqual(follow.status_code, 200)
+        self.assertIn('<option value="expert" selected>', follow.get_data(as_text=True))
 
     def test_camera_native_actions_page_renders_history(self) -> None:
         self.hub.config["ui"]["competency_level"] = "advanced"
