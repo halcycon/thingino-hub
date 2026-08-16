@@ -7780,10 +7780,10 @@ class Hub:
             result.update(phase="no_api_url", detail="Native API base URL is missing")
             return result
 
-        anonymous = CameraApiClient(base_url, token="", timeout=5)
-        authed = CameraApiClient(base_url, token=token, timeout=8) if token else None
+        anonymous = CameraApiClient(base_url, token="", timeout=3)
+        authed = CameraApiClient(base_url, token=token, timeout=5) if token else None
 
-        anon_device = anonymous.diagnose_path("/device", timeout=5)
+        anon_device = anonymous.diagnose_path("/device", timeout=3)
         result["checks"]["anonymous_device"] = anon_device
         if anon_device.get("kind") in {"refused", "timeout"}:
             result.update(
@@ -7803,7 +7803,7 @@ class Hub:
             return result
 
         assert authed is not None
-        device = authed.diagnose_path("/device", timeout=5)
+        device = authed.diagnose_path("/device", timeout=3)
         result["checks"]["device"] = device
         if device.get("kind") in {"unauthorized", "forbidden"}:
             result.update(
@@ -7812,20 +7812,25 @@ class Hub:
                 detail="Stored token was rejected (401/403) — re-install pairing bundle or paste token on camera",
             )
             return result
-        if not device.get("ok"):
+        if device.get("kind") in {"refused", "timeout"}:
             result.update(
                 auth="error",
-                phase="agent_down" if device.get("kind") in {"refused", "timeout"} else "agent",
-                detail=str(device.get("detail") or "Authenticated /device failed"),
+                phase="agent_down",
+                detail=str(device.get("detail") or "Authenticated /device timed out or refused"),
             )
             return result
-        result["auth"] = "ok"
+        # Empty/invalid /device is a wedged agent symptom — keep probing other routes
+        # instead of aborting into the generic pairing checklist.
+        if device.get("ok"):
+            result["auth"] = "ok"
+        else:
+            result["auth"] = str(device.get("kind") or "error")
 
-        caps = authed.diagnose_path("/capabilities", timeout=8)
+        caps = authed.diagnose_path("/capabilities", timeout=5)
         result["checks"]["capabilities"] = caps
         result["capabilities"] = "ok" if caps.get("ok") else str(caps.get("kind") or "error")
 
-        config = authed.diagnose_path("/config", timeout=12, allow_empty=False)
+        config = authed.diagnose_path("/config", timeout=8, allow_empty=False)
         result["checks"]["config"] = config
         if config.get("ok"):
             result["config"] = "ok"
@@ -7834,11 +7839,17 @@ class Hub:
         else:
             result["config"] = str(config.get("kind") or "error")
 
-        settings = authed.diagnose_path("/settings/image/brightness", timeout=5)
+        settings = authed.diagnose_path("/settings/image/brightness", timeout=3)
         result["checks"]["settings_brightness"] = settings
         result["settings"] = "ok" if settings.get("ok") else str(settings.get("kind") or "error")
 
-        if caps.get("ok") and result["config"] == "empty":
+        soft_fail_kinds = {"empty", "invalid_json"}
+        device_soft = str(device.get("kind") or "") in soft_fail_kinds
+        config_soft = result["config"] in soft_fail_kinds or result["config"] == "empty"
+        caps_ok = bool(caps.get("ok"))
+        settings_ok = bool(settings.get("ok"))
+
+        if caps_ok and result["config"] == "empty":
             result.update(
                 phase="config_wedge",
                 detail=(
@@ -7847,13 +7858,33 @@ class Hub:
                 ),
             )
             return result
-        if caps.get("ok") and result["config"] == "ok":
+        if caps_ok and result["config"] == "ok" and device.get("ok"):
             result.update(phase="healthy", detail="Native API answers device, capabilities, and config")
             return result
-        if settings.get("ok") and not caps.get("ok"):
+        if settings_ok and (device_soft or config_soft or not caps_ok):
             result.update(
                 phase="config_wedge",
-                detail="Narrow /settings works but omnibus routes are unhealthy — restart the camera agent",
+                detail=(
+                    "Token works for some routes, but omnibus responses are empty/invalid — "
+                    "restart the camera agent (pairing is not required)"
+                ),
+            )
+            return result
+        if device_soft or config_soft:
+            result.update(
+                phase="config_wedge",
+                detail=str(
+                    device.get("detail")
+                    or config.get("detail")
+                    or "Native API returned empty/non-JSON — restart the camera agent"
+                ),
+            )
+            return result
+        if caps_ok and result["config"] == "ok":
+            # Device soft-failed but caps+config work.
+            result.update(
+                phase="healthy",
+                detail="Native API answers capabilities and config",
             )
             return result
 
@@ -7862,6 +7893,7 @@ class Hub:
             detail=str(
                 config.get("detail")
                 or caps.get("detail")
+                or device.get("detail")
                 or "Native API is up with a valid token, but some routes still fail"
             ),
         )
@@ -7923,6 +7955,16 @@ class Hub:
                 return None
             if diagnosed_phase in {"needs_pairing", "agent_down", "config_wedge", "agent"}:
                 phase = diagnosed_phase
+            # Paired + on MQTT + soft API failures should never push the full pairing checklist.
+            if (
+                phase == "agent"
+                and is_paired
+                and present_on_mqtt
+                and diagnosed_phase in {"agent", "config_wedge", "agent_down"}
+            ):
+                detail_l = diagnosed_detail.lower()
+                if any(marker in detail_l for marker in ("empty", "non-json", "invalid json", "timed out", "timeout", "refused")):
+                    phase = "config_wedge" if "refused" not in detail_l and "timed out" not in detail_l and "timeout" not in detail_l else "agent_down"
             if diagnosed_detail:
                 reason = diagnosed_detail
         except Exception as error:
