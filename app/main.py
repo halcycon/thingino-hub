@@ -1834,6 +1834,9 @@ class Hub:
                 "value_type": value_type,
                 "label": label,
                 "ui": ui,
+                # Advanced leaves are still written on restore, but confirming every
+                # GET after a large imaging block overloads the agent (empty responses).
+                "confirm": bool(ui),
             }
             if config_key == "anti_flicker":
                 entry["enum"] = ["off", "50hz", "60hz"]
@@ -1905,6 +1908,7 @@ class Hub:
                         "value_type": value_type,
                         "label": label,
                         "ui": ui,
+                        "confirm": bool(ui),
                     }
                 )
             for config_key, path_suffix, body_key, value_type, label, ui in osd_leaves:
@@ -1917,6 +1921,7 @@ class Hub:
                         "value_type": value_type,
                         "label": label,
                         "ui": ui,
+                        "confirm": bool(ui),
                     }
                 )
             for element_name, fields in element_leaves.items():
@@ -1929,6 +1934,7 @@ class Hub:
                         "value_type": value_type,
                         "label": label,
                         "ui": ui,
+                        "confirm": bool(ui),
                     }
                     if value_type == "enum" and config_key == "position":
                         entry["enum"] = self._osd_position_choices()
@@ -2045,23 +2051,42 @@ class Hub:
         camera: Camera,
         payload: dict[str, Any],
         *,
-        timeout_seconds: float = 8.0,
+        timeout_seconds: float = 12.0,
     ) -> tuple[bool, str]:
-        """Poll narrow /settings leaves until the stage values appear, with backoff."""
+        """Poll narrow /settings leaves until the stage values appear, with backoff.
+
+        Only catalog entries marked confirm=True are checked. Advanced peels are still
+        written, but confirming every leaf after a large restore block overloads the
+        agent and produces empty /settings responses.
+        """
         settings_patches, residual = self._split_native_config_patch_for_settings(payload)
+        confirm_paths = {
+            str(entry.get("settings_path") or "")
+            for entry in self._native_writable_settings_catalog()
+            if entry.get("confirm", entry.get("ui", False))
+        }
+        settings_patches = [(path, body) for path, body in settings_patches if path in confirm_paths]
         if not settings_patches and not residual:
             return True, "nothing to confirm"
+
+        # Brief settle after a burst of leaf PATCHes before hammering GETs.
+        time.sleep(0.6)
         client = self._camera_api_client(camera)
-        deadline = time.monotonic() + max(1.0, float(timeout_seconds))
-        delay = 0.4
+        scaled_timeout = max(float(timeout_seconds), 6.0 + 0.4 * len(settings_patches))
+        deadline = time.monotonic() + scaled_timeout
+        delay = 0.5
         last_detail = "not confirmed yet"
         while True:
             mismatches: list[str] = []
+            transient = 0
             for path, body in settings_patches:
                 try:
                     live = client.get_setting(path)
                 except Exception as error:
+                    detail = str(error)
                     mismatches.append(f"{path}: {error}")
+                    if "empty response" in detail.lower() or "non-json" in detail.lower() or "timed out" in detail.lower():
+                        transient += 1
                     continue
                 if not isinstance(live, dict):
                     mismatches.append(f"{path}: non-object response")
@@ -2083,9 +2108,18 @@ class Hub:
                 return True, "confirmed"
             last_detail = "; ".join(mismatches[:4])
             if time.monotonic() >= deadline:
+                # If the agent only returned empty/transient read errors, treat as soft
+                # success after retries — writes were already accepted by patch_setting.
+                if settings_patches and transient >= len(mismatches):
+                    LOG.warning(
+                        "Confirm for %s timed out on transient settings reads; continuing (%s)",
+                        camera.camera_id,
+                        last_detail,
+                    )
+                    return True, f"accepted without confirm ({last_detail})"
                 return False, last_detail
             time.sleep(delay)
-            delay = min(delay * 2.0, 2.0)
+            delay = min(delay * 2.0, 2.5)
 
     def patch_camera_config(
         self,
@@ -2779,12 +2813,15 @@ class Hub:
         live_config_ok = False
         live_capabilities_ok = False
         api_status = str(camera.api_status or "").strip().lower()
-        if self._camera_api_base_url(camera) and api_status != "offline":
+        # Prefer a live probe over a stale offline flag — omnibus GET /config can be empty
+        # while /device+/capabilities still work after a heavy restore.
+        can_probe = bool(self._camera_api_base_url(camera) and self._camera_api_token(camera))
+        if can_probe:
             client = self._camera_api_client(camera)
             config_timeout = self._camera_config_read_timeout(client)
             try:
                 caps = client.get_capabilities()
-                if isinstance(caps, dict):
+                if isinstance(caps, dict) and caps:
                     live_capabilities = caps
                     live_capabilities_ok = True
             except Exception as error:
@@ -2792,13 +2829,26 @@ class Hub:
                 LOG.debug("Restore preview capabilities failed for %s: %s", resolved, error, exc_info=True)
             try:
                 cfg = client.get_config(timeout=config_timeout)
-                if isinstance(cfg, dict):
+                if isinstance(cfg, dict) and cfg:
                     live_config = cfg
                     live_config_ok = True
+                elif isinstance(cfg, dict):
+                    live_read_error = live_read_error or (
+                        "Live GET /config returned an empty body — agent is up but omnibus config "
+                        "is wedged; restore can still apply via /settings leaves."
+                    )
             except Exception as error:
                 detail = self._normalize_native_api_error(error)
                 live_read_error = live_read_error or detail
                 LOG.debug("Restore preview config failed for %s: %s", resolved, error, exc_info=True)
+            if live_capabilities_ok and api_status == "offline":
+                # Cached status lagged behind a working agent; clear the false offline mark.
+                try:
+                    info = self._fetch_camera_api_details(camera)
+                    self._record_api_result(resolved, info, "")
+                    api_status = "online"
+                except Exception:
+                    pass
         elif api_status == "offline":
             live_read_error = "Native API is offline for this camera."
 
@@ -2809,13 +2859,14 @@ class Hub:
             require_live_capabilities=True,
         )
         restore_blocked_reason = ""
-        if api_status == "offline":
+        if not can_probe and api_status == "offline":
             restore_blocked_reason = live_read_error or "Native API is offline."
-        elif not live_capabilities_ok and not live_config_ok:
+        elif not live_capabilities_ok:
             restore_blocked_reason = (
                 live_read_error
-                or "Could not read live capabilities/config from the camera. Restore is blocked until the native API answers."
+                or "Could not read live capabilities from the camera. Restore is blocked until the native API answers."
             )
+        # Empty omnibus GET /config alone does not block: peel + /settings confirm is enough.
         return {
             "camera_id": resolved,
             "snapshot": self._config_snapshot_detail_for_ui(snapshot),
@@ -3606,7 +3657,7 @@ class Hub:
                     # Still offer in best-effort when the peel map can express it.
                     best_effort_payload[path] = value
                 continue
-            if caps_ok or peelable:
+            if caps_ok:
                 compatible.append(entry)
                 compatible_payload[path] = value
                 best_effort_payload[path] = value
@@ -7372,7 +7423,11 @@ class Hub:
         if config_removed:
             config["cameras"] = filtered_cameras
             self.save_config(config)
-            self.reload_config()
+            # Do not reload_config() here: a full reload rebuilds static cameras from
+            # config.yaml and can briefly drop MQTT-only live identities (e.g. right
+            # after migrate), causing "Unknown camera" on the next request.
+            with self.state_lock:
+                self.static_camera_ids.discard(resolved)
 
         retained_cleared = False
         retained_error = ""
@@ -7691,6 +7746,127 @@ class Hub:
             **self._camera_config_backup_prompt_for_ui(resolved, is_paired=is_paired),
         }
 
+    def diagnose_camera_native_api(self, camera_id: str) -> dict[str, Any]:
+        """Live probe ladder: listener → auth → capabilities → config → settings.
+
+        Distinguishes needs-pairing vs wrong-token vs agent-down vs config-wedge.
+        """
+        resolved = self._resolve_camera_id(camera_id) or str(camera_id or "").strip().lower()
+        with self.state_lock:
+            camera = self.cameras.get(resolved)
+        if camera is None:
+            raise RuntimeError(f"Unknown camera: {camera_id}")
+        return self._diagnose_camera_native_api(camera)
+
+    def _diagnose_camera_native_api(self, camera: Camera) -> dict[str, Any]:
+        base_url = self._camera_api_base_url(camera)
+        token = str(self._camera_api_token(camera) or "").strip()
+        present_on_mqtt = self._camera_registration_status_for_ui(camera) == "online"
+        result: dict[str, Any] = {
+            "camera_id": camera.camera_id,
+            "api_base_url": base_url or "",
+            "has_token": bool(token),
+            "present_on_mqtt_broker": present_on_mqtt,
+            "listener": "unknown",
+            "auth": "unknown",
+            "capabilities": "unknown",
+            "config": "unknown",
+            "settings": "unknown",
+            "phase": "unknown",
+            "detail": "",
+            "checks": {},
+        }
+        if not base_url:
+            result.update(phase="no_api_url", detail="Native API base URL is missing")
+            return result
+
+        anonymous = CameraApiClient(base_url, token="", timeout=5)
+        authed = CameraApiClient(base_url, token=token, timeout=8) if token else None
+
+        anon_device = anonymous.diagnose_path("/device", timeout=5)
+        result["checks"]["anonymous_device"] = anon_device
+        if anon_device.get("kind") in {"refused", "timeout"}:
+            result.update(
+                listener="down",
+                phase="agent_down",
+                detail=str(anon_device.get("detail") or "Agent is not accepting HTTPS on :1998"),
+            )
+            return result
+        result["listener"] = "up"
+
+        if not token:
+            result.update(
+                auth="missing",
+                phase="needs_pairing",
+                detail="Hub has no API token stored for this camera — install the pairing bundle",
+            )
+            return result
+
+        assert authed is not None
+        device = authed.diagnose_path("/device", timeout=5)
+        result["checks"]["device"] = device
+        if device.get("kind") in {"unauthorized", "forbidden"}:
+            result.update(
+                auth="rejected",
+                phase="needs_pairing",
+                detail="Stored token was rejected (401/403) — re-install pairing bundle or paste token on camera",
+            )
+            return result
+        if not device.get("ok"):
+            result.update(
+                auth="error",
+                phase="agent_down" if device.get("kind") in {"refused", "timeout"} else "agent",
+                detail=str(device.get("detail") or "Authenticated /device failed"),
+            )
+            return result
+        result["auth"] = "ok"
+
+        caps = authed.diagnose_path("/capabilities", timeout=8)
+        result["checks"]["capabilities"] = caps
+        result["capabilities"] = "ok" if caps.get("ok") else str(caps.get("kind") or "error")
+
+        config = authed.diagnose_path("/config", timeout=12, allow_empty=False)
+        result["checks"]["config"] = config
+        if config.get("ok"):
+            result["config"] = "ok"
+        elif config.get("kind") == "empty":
+            result["config"] = "empty"
+        else:
+            result["config"] = str(config.get("kind") or "error")
+
+        settings = authed.diagnose_path("/settings/image/brightness", timeout=5)
+        result["checks"]["settings_brightness"] = settings
+        result["settings"] = "ok" if settings.get("ok") else str(settings.get("kind") or "error")
+
+        if caps.get("ok") and result["config"] == "empty":
+            result.update(
+                phase="config_wedge",
+                detail=(
+                    "Token and capabilities work, but GET /config is empty — "
+                    "restart the camera agent (pairing is not required)"
+                ),
+            )
+            return result
+        if caps.get("ok") and result["config"] == "ok":
+            result.update(phase="healthy", detail="Native API answers device, capabilities, and config")
+            return result
+        if settings.get("ok") and not caps.get("ok"):
+            result.update(
+                phase="config_wedge",
+                detail="Narrow /settings works but omnibus routes are unhealthy — restart the camera agent",
+            )
+            return result
+
+        result.update(
+            phase="agent",
+            detail=str(
+                config.get("detail")
+                or caps.get("detail")
+                or "Native API is up with a valid token, but some routes still fail"
+            ),
+        )
+        return result
+
     def get_camera_api_recovery_guide(
         self,
         camera: Camera,
@@ -7723,6 +7899,35 @@ class Hub:
         if is_paired:
             phase = "agent"
         present_on_mqtt = self._camera_registration_status_for_ui(camera) == "online"
+        diagnosis: dict[str, Any] | None = None
+        try:
+            diagnosis = self._diagnose_camera_native_api(camera)
+            diagnosed_phase = str(diagnosis.get("phase") or "").strip()
+            diagnosed_detail = str(diagnosis.get("detail") or "").strip()
+            if diagnosed_phase == "healthy":
+                # Live probe says the API is fine — clear the stale offline banner.
+                try:
+                    info = self._fetch_camera_api_details(camera)
+                    self._record_api_result(camera.camera_id, info, "")
+                except Exception:
+                    self._record_api_result(
+                        camera.camera_id,
+                        {
+                            "device_name": camera.api_device_name or camera.name,
+                            "device_model": camera.api_device_model,
+                            "streamer": camera.api_streamer,
+                            "version": camera.api_version,
+                        },
+                        "",
+                    )
+                return None
+            if diagnosed_phase in {"needs_pairing", "agent_down", "config_wedge", "agent"}:
+                phase = diagnosed_phase
+            if diagnosed_detail:
+                reason = diagnosed_detail
+        except Exception as error:
+            LOG.debug("Native API diagnosis failed for %s: %s", camera.camera_id, error, exc_info=True)
+
         mqtt_cfg = self.config.get("mqtt") if isinstance(getattr(self, "config", None), dict) else {}
         if not isinstance(mqtt_cfg, dict):
             mqtt_cfg = {}
@@ -7742,6 +7947,7 @@ class Hub:
             "mqtt_command_status": str(camera.mqtt_command_status or ""),
             "mqtt_broker_host": mqtt_host,
             "mqtt_broker_port": int(mqtt_port) if str(mqtt_port or "").strip().isdigit() else 1883,
+            "diagnosis": diagnosis,
         }
 
     def _camera_config_backup_prompt_for_ui(self, camera_id: str, *, is_paired: bool) -> dict[str, Any]:

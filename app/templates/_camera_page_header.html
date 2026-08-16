@@ -187,6 +187,81 @@
   {% if camera.api_recovery %}
   {% set recovery = camera.api_recovery %}
   <div class="alert alert-warning mt-3 shadow-sm" role="status">
+    {% if recovery.phase == 'config_wedge' %}
+    <div class="fw-semibold mb-1">Native API is partially up — omnibus config is wedged</div>
+    <div class="small mb-3">
+      Current block: <span class="font-monospace">{{ recovery.reason }}</span>
+      {% if recovery.api_base_url %}
+        · target <span class="font-monospace">{{ recovery.api_base_url }}</span>
+      {% endif %}
+      {% if recovery.diagnosis %}
+        · live check:
+        listener {{ recovery.diagnosis.listener }},
+        auth {{ recovery.diagnosis.auth }},
+        capabilities {{ recovery.diagnosis.capabilities }},
+        config {{ recovery.diagnosis.config }},
+        settings {{ recovery.diagnosis.settings }}
+      {% endif %}
+    </div>
+    <p class="small mb-3 mb-md-2">
+      MQTT and pairing look fine. The agent is answering some routes, but
+      <span class="font-monospace">GET /config</span> is returning empty/non-JSON (common after a heavy restore).
+      You usually do <strong>not</strong> need to re-pair — restart the hub agent on the camera, wait ~30s, then refresh.
+    </p>
+    <ol class="small mb-3">
+      <li class="mb-2">
+        <div class="fw-semibold">1. Restart the agent on the camera</div>
+        <div class="text-body-secondary">
+          Open <a href="{{ recovery.web_ui_url }}" target="_blank" rel="noreferrer">{{ recovery.web_ui_url }}</a>
+          → restart the hub/agent service (or reboot the camera).
+        </div>
+      </li>
+      <li class="mb-0">
+        <div class="fw-semibold">2. Refresh this page, then restore</div>
+        <div class="text-body-secondary">
+          When Native API shows online, use Config Backups → Review restore.
+          Restore applies via <span class="font-monospace">/settings</span> leaves even if omnibus config is still empty.
+        </div>
+      </li>
+    </ol>
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-sm btn-outline-secondary" href="{{ recovery.web_ui_url }}" target="_blank" rel="noreferrer">Open camera Web UI</a>
+      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('camera_config_backups', camera_id=camera.camera_id) }}">Config Backups</a>
+      <button class="btn btn-sm btn-outline-primary" type="button" onclick="window.location.reload()">Refresh status</button>
+    </div>
+    {% elif recovery.phase == 'agent_down' %}
+    <div class="fw-semibold mb-1">Native API listener is down</div>
+    <div class="small mb-3">
+      Current block: <span class="font-monospace">{{ recovery.reason }}</span>
+      {% if recovery.api_base_url %}
+        · target <span class="font-monospace">{{ recovery.api_base_url }}</span>
+      {% endif %}
+    </div>
+    <p class="small mb-3">
+      Nothing is answering on port 1998 yet. Pairing again will not help until the agent is listening —
+      restart the hub agent on the camera (or reboot), then refresh.
+    </p>
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-sm btn-outline-secondary" href="{{ recovery.web_ui_url }}" target="_blank" rel="noreferrer">Open camera Web UI</a>
+      <button class="btn btn-sm btn-outline-primary" type="button" onclick="window.location.reload()">Refresh status</button>
+    </div>
+    {% elif recovery.phase == 'needs_pairing' %}
+    <div class="fw-semibold mb-1">Native API needs pairing</div>
+    <div class="small mb-3">
+      Current block: <span class="font-monospace">{{ recovery.reason }}</span>
+      {% if recovery.diagnosis %}
+        · live check: listener {{ recovery.diagnosis.listener }}, auth {{ recovery.diagnosis.auth }}
+      {% endif %}
+    </div>
+    <p class="small mb-3">
+      The agent is up, but this hub has no working token for it. Install the pairing bundle (or paste the token under
+      Services → Hub Pairing on the camera).
+    </p>
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-sm btn-outline-secondary" href="{{ recovery.web_ui_url }}" target="_blank" rel="noreferrer">Open camera Web UI</a>
+      <button class="btn btn-sm btn-outline-primary" type="button" onclick="window.location.reload()">Refresh status</button>
+    </div>
+    {% else %}
     <div class="fw-semibold mb-1">Native API is not ready yet — follow this order</div>
     <div class="small mb-3">
       Current block: <span class="font-monospace">{{ recovery.reason }}</span>
@@ -258,6 +333,7 @@
       <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('camera_config_backups', camera_id=camera.camera_id) }}">Config Backups</a>
       <button class="btn btn-sm btn-outline-primary" type="button" onclick="window.location.reload()">Refresh status</button>
     </div>
+    {% endif %}
   </div>
   {% endif %}
 
@@ -336,19 +412,19 @@
     </div>
   </div>
   {% endif %}
-  {% elif camera.api_recovery and camera.api_recovery.is_paired %}
+  {% elif camera.api_recovery and camera.api_recovery.phase == 'needs_pairing' %}
   <div class="card border-warning-subtle bg-warning-subtle mt-3 shadow-sm">
     <div class="card-body">
-      <h2 class="h5 mb-2">Re-install pairing (API still offline)</h2>
+      <h2 class="h5 mb-2">Install / re-install pairing</h2>
       <p class="small text-body-secondary mb-3">
-        The hub already has a token, but the camera is not answering the native API.
-        Confirm camera <strong>MQTT</strong> still points at this hub (step 1 above), then re-run Install Pairing Bundle
+        Live probe says the agent is up, but this hub’s token is missing or rejected.
+        Confirm camera MQTT still points at this hub, then install the pairing bundle
         or paste the token under Services → Hub Pairing.
       </p>
       <form action="{{ url_for('pair_camera', camera_id=camera.camera_id) }}" method="post" class="d-flex flex-wrap gap-2 align-items-center">
         <input type="hidden" name="redirect_page" value="{{ page_key }}">
         <input type="hidden" name="backup_before_present" value="1">
-        <button class="btn btn-primary" type="submit">Install Pairing Bundle again</button>
+        <button class="btn btn-primary" type="submit">Install Pairing Bundle</button>
         <a class="btn btn-outline-secondary" href="{{ camera.api_recovery.web_ui_url }}" target="_blank" rel="noreferrer">Open camera Web UI</a>
       </form>
     </div>

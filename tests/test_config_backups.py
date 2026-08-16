@@ -139,6 +139,8 @@ class _ConfigHubTestMixin:
         hub._restore_leaf_conflict = Hub._restore_leaf_conflict.__get__(hub, Hub)
         hub._payload_from_clone_selection = Hub._payload_from_clone_selection.__get__(hub, Hub)
         hub._split_native_config_patch_for_settings = Hub._split_native_config_patch_for_settings.__get__(hub, Hub)
+        hub._native_writable_settings_catalog = Hub._native_writable_settings_catalog.__get__(hub, Hub)
+        hub._osd_position_choices = Hub._osd_position_choices.__get__(hub, Hub)
         hub._stream_setting_path = Hub._stream_setting_path.__get__(hub, Hub)
         hub._native_config_stage_plan = Hub._native_config_stage_plan.__get__(hub, Hub)
         hub._setting_values_match = Hub._setting_values_match.__get__(hub, Hub)
@@ -287,6 +289,38 @@ class ConfigBackupHubTests(_ConfigHubTestMixin, unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "non-JSON|empty|not ready|Could not read"):
             hub.restore_camera_config_backup("aabbccddeeff", snapshot_id, mode="compatible")
 
+    def test_restore_preview_allows_when_capabilities_ok_but_config_empty(self) -> None:
+        hub = self._hub_with_store()
+        snapshot_id = hub.history_store.record_config_snapshot(
+            recorded_at=int(time.time()),
+            camera_id="aabbccddeeff",
+            source="manual",
+            config={"image": {"hflip": True}, "stream0": {"width": 1920}},
+            capabilities={"image": {}, "streams": {}},
+            content_hash="snap-empty-config",
+        )["snapshot_id"]
+
+        class FakeClient:
+            def get_capabilities(self) -> dict:
+                return {"image": {}, "streams": {}}
+
+            def get_config(self, timeout: int | None = None) -> dict:
+                raise RuntimeError("Empty response for /config — native API returned no JSON")
+
+        hub._camera_api_client = lambda camera: FakeClient()  # type: ignore[method-assign]
+        hub._camera_api_token = lambda camera: "token"  # type: ignore[method-assign]
+        hub._fetch_camera_api_details = lambda camera: {  # type: ignore[method-assign]
+            "device_name": "cam",
+            "streamer": "raptor",
+            "version": "1",
+        }
+        hub._record_api_result = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        preview = hub.preview_camera_config_restore("aabbccddeeff", snapshot_id)
+        self.assertTrue(preview["restore_ready"])
+        self.assertTrue(preview["live_capabilities_ok"])
+        self.assertFalse(preview["live_config_ok"])
+        self.assertGreater(preview["compatible_count"], 0)
+
     def test_restore_apply_uses_settings_peel_for_stream_osd(self) -> None:
         hub = self._hub_with_store()
         snapshot_id = hub.history_store.record_config_snapshot(
@@ -346,6 +380,32 @@ class ConfigBackupHubTests(_ConfigHubTestMixin, unittest.TestCase):
         paths = [path for path, _body in setting_calls]
         self.assertTrue(any(path.endswith("width") or "width" in path for path in paths), paths)
         self.assertTrue(any("osd" in path for path in paths), paths)
+
+    def test_confirm_skips_advanced_image_leaves(self) -> None:
+        hub = self._hub_with_store()
+        get_paths: list[str] = []
+
+        class FakeClient:
+            def get_setting(self, path: str) -> dict:
+                get_paths.append(path)
+                if path in {"image/ae-compensation", "image/core-wb-mode"}:
+                    raise RuntimeError(f"Empty response for /settings/{path}")
+                return {"brightness": 128}
+
+        hub._camera_api_client = lambda camera: FakeClient()  # type: ignore[method-assign]
+        with mock.patch("app.main.time.sleep", return_value=None):
+            ok, detail = hub._confirm_native_config_stage(
+                hub.cameras["aabbccddeeff"],
+                {
+                    "image": {
+                        "brightness": 128,
+                        "ae_compensation": 5,
+                        "core_wb_mode": 0,
+                    }
+                },
+            )
+        self.assertTrue(ok, detail)
+        self.assertEqual(get_paths, ["image/brightness"])
 
     def test_restore_stages_emit_plan_and_confirm(self) -> None:
         hub = self._hub_with_store()

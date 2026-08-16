@@ -162,6 +162,65 @@ class CameraApiClient:
             "privacy": self.get_runtime("privacy"),
         }
 
+    def diagnose_path(self, path: str, *, timeout: int | None = None, allow_empty: bool = False) -> dict[str, Any]:
+        """Probe one API path and classify the outcome without raising."""
+        normalized = "/" + str(path or "").strip().lstrip("/")
+        try:
+            body, headers = self._request("GET", normalized, accept="application/json", timeout=timeout)
+        except CameraApiError as error:
+            detail = str(error)
+            lowered = detail.lower()
+            kind = "error"
+            if "errno 111" in lowered or "connection refused" in lowered:
+                kind = "refused"
+            elif "timed out" in lowered or "timeout" in lowered:
+                kind = "timeout"
+            elif "unauthorized" in lowered or "http 401" in lowered or "http_401" in lowered:
+                kind = "unauthorized"
+            elif "http 403" in lowered or "forbidden" in lowered:
+                kind = "forbidden"
+            elif "empty response" in lowered:
+                kind = "empty"
+            elif "invalid json" in lowered or "non-json" in lowered:
+                kind = "invalid_json"
+            return {"ok": False, "kind": kind, "detail": detail, "path": normalized}
+        if not body.strip():
+            if allow_empty:
+                return {"ok": True, "kind": "empty_ok", "detail": "", "path": normalized, "bytes": 0}
+            return {
+                "ok": False,
+                "kind": "empty",
+                "detail": f"Empty response for {normalized}",
+                "path": normalized,
+                "bytes": 0,
+            }
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+        except Exception as error:
+            return {
+                "ok": False,
+                "kind": "invalid_json",
+                "detail": str(error),
+                "path": normalized,
+                "bytes": len(body),
+            }
+        if not isinstance(decoded, dict):
+            return {
+                "ok": False,
+                "kind": "invalid_json",
+                "detail": f"Unexpected JSON type for {normalized}",
+                "path": normalized,
+                "bytes": len(body),
+            }
+        return {
+            "ok": True,
+            "kind": "ok",
+            "detail": "",
+            "path": normalized,
+            "bytes": len(body),
+            "keys": sorted(str(key) for key in decoded.keys())[:12],
+        }
+
     def try_get_setting(self, path: str) -> dict[str, Any] | None:
         try:
             return self.get_setting(path)

@@ -144,6 +144,52 @@ class CameraMigrationTests(unittest.TestCase):
         self.assertEqual(backups[0]["label"], "pre-ota")
         self.assertTrue(result["restore_available"])
 
+    def test_migrate_does_not_reload_config_when_removing_stale(self) -> None:
+        """Regression: unregister used to reload_config and drop the live MQTT identity."""
+        hub = self._hub()
+        hub.config = {
+            "cameras": [
+                {"id": "oldmac000001", "name": "Bird Box", "ip": "192.168.140.11"},
+            ]
+        }
+        hub.export_config = lambda: {  # type: ignore[method-assign]
+            "cameras": [dict(item) for item in (hub.config.get("cameras") or [])]
+        }
+        saved: list[dict] = []
+
+        def save_config(config: dict) -> None:
+            saved.append(
+                {
+                    "cameras": [dict(item) for item in (config.get("cameras") or [])],
+                }
+            )
+            hub.config = {
+                "cameras": [dict(item) for item in (config.get("cameras") or [])],
+            }
+
+        reloads: list[str] = []
+        hub.save_config = save_config  # type: ignore[method-assign]
+        hub.reload_config = lambda: reloads.append("reload")  # type: ignore[method-assign]
+        hub.unregister_camera = Hub.unregister_camera.__get__(hub, Hub)
+        hub.history_store.record_config_snapshot(
+            recorded_at=int(time.time()),
+            camera_id="oldmac000001",
+            source="manual",
+            label="pre-ota",
+            config={"image": {"brightness": 128}},
+            content_hash="pre-ota-3",
+        )
+        result = hub.migrate_camera_identity(
+            from_camera_id="oldmac000001",
+            to_camera_id="newmac000002",
+            restore_latest_backup=False,
+        )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(reloads, [])
+        self.assertIn("newmac000002", hub.cameras)
+        self.assertNotIn("oldmac000001", hub.cameras)
+        self.assertTrue(any("newmac000002" in {str(c.get("id") or "").lower() for c in cfg.get("cameras", [])} for cfg in saved))
+
     def test_migrate_defers_restore_until_paired(self) -> None:
         hub = self._hub()
         hub.history_store.record_config_snapshot(
