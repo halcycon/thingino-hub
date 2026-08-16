@@ -886,6 +886,10 @@ i {
 	font-variant-numeric: tabular-nums;
 }
 
+.hub-apply-progress-row[data-state="pending"] .hub-apply-progress-message {
+	opacity: 0.65;
+}
+
 .hub-apply-progress-row[data-state="active"] .hub-apply-progress-message {
 	color: #f80;
 }

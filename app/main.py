@@ -1669,20 +1669,27 @@ class Hub:
                 if "enabled" in osd_payload:
                     stream_update["osd_enabled"] = bool(self._coerce_bool(osd_payload.get("enabled")))
                 time_payload = osd_payload.get("time") or {}
-                if isinstance(time_payload, dict) and "enabled" in time_payload:
-                    stream_update["osd_time_enabled"] = bool(self._coerce_bool(time_payload.get("enabled")))
+                if isinstance(time_payload, dict):
+                    if "enabled" in time_payload:
+                        stream_update["osd_time_enabled"] = bool(self._coerce_bool(time_payload.get("enabled")))
+                    if "position" in time_payload:
+                        stream_update["osd_time_position"] = str(time_payload.get("position") or "")
                 usertext_payload = osd_payload.get("usertext") or {}
                 if isinstance(usertext_payload, dict):
                     if "enabled" in usertext_payload:
                         stream_update["osd_usertext_enabled"] = bool(self._coerce_bool(usertext_payload.get("enabled")))
                     if "format" in usertext_payload:
                         stream_update["osd_usertext_format"] = str(usertext_payload.get("format") or "")
+                    if "position" in usertext_payload:
+                        stream_update["osd_usertext_position"] = str(usertext_payload.get("position") or "")
                 privacy_payload = osd_payload.get("privacy") or {}
                 if isinstance(privacy_payload, dict):
                     if "enabled" in privacy_payload:
                         stream_update["osd_privacy_enabled"] = bool(self._coerce_bool(privacy_payload.get("enabled")))
                     if "text" in privacy_payload:
                         stream_update["osd_privacy_text"] = str(privacy_payload.get("text") or "")
+                    if "position" in privacy_payload:
+                        stream_update["osd_privacy_position"] = str(privacy_payload.get("position") or "")
                     if "fill_color" in privacy_payload:
                         fill_color_value, fill_alpha = self._split_hex_color_alpha(privacy_payload.get("fill_color"))
                         stream_update["osd_privacy_fill_color"] = str(privacy_payload.get("fill_color") or "")
@@ -1782,58 +1789,191 @@ class Hub:
             return f"streams/{stream_id}"
         return f"streams/{stream_id}/{suffix}"
 
+    def _osd_position_choices(self) -> list[str]:
+        """Canonical OSD position tokens supported by the Raptor agent settings leaves."""
+        return [
+            "top_left",
+            "top_center",
+            "top_right",
+            "middle_left",
+            "middle_center",
+            "middle_right",
+            "bottom_left",
+            "bottom_center",
+            "bottom_right",
+        ]
+
+    def _native_writable_settings_catalog(self, *, stream_ids: list[int] | None = None) -> list[dict[str, Any]]:
+        """Capability-oriented catalog of config leaves writable via /settings.
+
+        Single source of truth for stream/OSD peels and Settings UI discovery.
+        Firmware still requires leaf writes for these fields; the catalog mirrors
+        the agent adapter's known settings paths (including OSD position).
+        """
+        ids = stream_ids if stream_ids is not None else [0, 1]
+        entries: list[dict[str, Any]] = []
+        image_leaves = [
+            ("brightness", "image/brightness", "brightness", "int", "Brightness", True),
+            ("contrast", "image/contrast", "contrast", "int", "Contrast", True),
+            ("saturation", "image/saturation", "saturation", "int", "Saturation", True),
+            ("sharpness", "image/sharpness", "sharpness", "int", "Sharpness", True),
+            ("anti_flicker", "image/anti-flicker", "anti_flicker", "enum", "Anti-flicker", True),
+            ("hflip", "image/hflip", "hflip", "bool", "Horizontal flip", True),
+            ("vflip", "image/vflip", "vflip", "bool", "Vertical flip", True),
+            ("ae_compensation", "image/ae-compensation", "ae_compensation", "int", "AE compensation", False),
+            ("core_wb_mode", "image/core-wb-mode", "core_wb_mode", "int", "WB mode", False),
+            ("wb_rgain", "image/wb-rgain", "wb_rgain", "int", "WB R gain", False),
+            ("wb_bgain", "image/wb-bgain", "wb_bgain", "int", "WB B gain", False),
+        ]
+        for config_key, settings_path, body_key, value_type, label, ui in image_leaves:
+            entry: dict[str, Any] = {
+                "group": "image",
+                "config_path": f"image.{config_key}",
+                "settings_path": settings_path,
+                "body_key": body_key,
+                "value_type": value_type,
+                "label": label,
+                "ui": ui,
+            }
+            if config_key == "anti_flicker":
+                entry["enum"] = ["off", "50hz", "60hz"]
+            entries.append(entry)
+
+        stream_leaves = [
+            ("enabled", "enabled", "enabled", "bool", "Enabled", True),
+            ("audio_enabled", "audio-enabled", "audio_enabled", "bool", "Audio", True),
+            ("width", "width", "width", "int", "Width", True),
+            ("height", "height", "height", "int", "Height", True),
+            ("fps", "fps", "fps", "int", "FPS", True),
+            ("bitrate", "bitrate", "bitrate", "int", "Bitrate", True),
+            ("format", "format", "format", "text", "Format", True),
+            ("mode", "mode", "mode", "text", "Mode", True),
+        ]
+        osd_leaves = [
+            ("enabled", "enabled", "enabled", "bool", "Overlay enabled", True),
+            ("font_path", "font-path", "font_path", "text", "Font path", False),
+            ("font_size", "font-size", "font_size", "int", "Font size", False),
+            ("stroke_size", "stroke-size", "stroke_size", "int", "Stroke size", False),
+        ]
+        element_leaves = {
+            "time": [
+                ("enabled", "enabled", "enabled", "bool", "Time overlay", True),
+                ("format", "format", "format", "text", "Time format", False),
+                ("position", "position", "position", "enum", "Time position", True),
+                ("fill_color", "fill-color", "fill_color", "text", "Time fill color", False),
+                ("stroke_color", "stroke-color", "stroke_color", "text", "Time stroke color", False),
+            ],
+            "usertext": [
+                ("enabled", "enabled", "enabled", "bool", "Label overlay", True),
+                ("format", "format", "format", "text", "Label text", True),
+                ("position", "position", "position", "enum", "Label position", True),
+                ("fill_color", "fill-color", "fill_color", "text", "Label fill color", False),
+                ("stroke_color", "stroke-color", "stroke_color", "text", "Label stroke color", False),
+            ],
+            "privacy": [
+                ("enabled", "enabled", "enabled", "bool", "Privacy overlay", True),
+                ("text", "text", "text", "text", "Privacy text", True),
+                ("position", "position", "position", "enum", "Privacy position", True),
+                ("font_size", "font-size", "font_size", "int", "Privacy font size", False),
+                ("fill_color", "fill-color", "fill_color", "text", "Privacy fill color", True),
+                ("stroke_color", "stroke-color", "stroke_color", "text", "Privacy stroke color", True),
+            ],
+            "logo": [
+                ("enabled", "enabled", "enabled", "bool", "Logo overlay", False),
+                ("path", "path", "path", "text", "Logo path", False),
+                ("position", "position", "position", "enum", "Logo position", False),
+                ("width", "width", "width", "int", "Logo width", False),
+                ("height", "height", "height", "int", "Logo height", False),
+            ],
+            "uptime": [
+                ("enabled", "enabled", "enabled", "bool", "Uptime overlay", False),
+                ("format", "format", "format", "text", "Uptime format", False),
+                ("position", "position", "position", "enum", "Uptime position", False),
+                ("fill_color", "fill-color", "fill_color", "text", "Uptime fill color", False),
+                ("stroke_color", "stroke-color", "stroke_color", "text", "Uptime stroke color", False),
+            ],
+        }
+        for stream_id in ids:
+            stream_name = f"stream{int(stream_id)}"
+            for config_key, path_suffix, body_key, value_type, label, ui in stream_leaves:
+                entries.append(
+                    {
+                        "group": stream_name,
+                        "config_path": f"{stream_name}.{config_key}",
+                        "settings_path": f"streams/{int(stream_id)}/{path_suffix}",
+                        "body_key": body_key,
+                        "value_type": value_type,
+                        "label": label,
+                        "ui": ui,
+                    }
+                )
+            for config_key, path_suffix, body_key, value_type, label, ui in osd_leaves:
+                entries.append(
+                    {
+                        "group": stream_name,
+                        "config_path": f"{stream_name}.osd.{config_key}",
+                        "settings_path": f"streams/{int(stream_id)}/osd/{path_suffix}",
+                        "body_key": body_key,
+                        "value_type": value_type,
+                        "label": label,
+                        "ui": ui,
+                    }
+                )
+            for element_name, fields in element_leaves.items():
+                for config_key, path_suffix, body_key, value_type, label, ui in fields:
+                    entry = {
+                        "group": stream_name,
+                        "config_path": f"{stream_name}.osd.{element_name}.{config_key}",
+                        "settings_path": f"streams/{int(stream_id)}/osd/{element_name}/{path_suffix}",
+                        "body_key": body_key,
+                        "value_type": value_type,
+                        "label": label,
+                        "ui": ui,
+                    }
+                    if value_type == "enum" and config_key == "position":
+                        entry["enum"] = self._osd_position_choices()
+                    entries.append(entry)
+        return entries
+
     def _split_native_config_patch_for_settings(
         self,
         payload: dict[str, Any],
     ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
         """Peel stream/OSD/image fields into /settings leaf patches.
 
-        Raptor's omnibus PATCH /config only applies a subset of image/motion/daynight
-        and ignores stream/OSD and image.anti_flicker — leaf settings paths are the
-        supported write surface for those fields.
+        Split responsibility:
+        - Raptor: omnibus PATCH /config only applies a subset of image/motion/daynight
+          and ignores stream/OSD (and some image leaves such as anti_flicker). Leaf
+          /settings/... paths are the supported write surface for those fields.
+        - Hub: peels come from `_native_writable_settings_catalog` so Settings UI,
+          restore, and clone share one writable-leaf map.
         """
         residual = dict(payload)
-        # Prudynt-style restart hints are not part of the canonical settings API.
         residual.pop("action", None)
         patches: list[tuple[str, dict[str, Any]]] = []
+
+        stream_ids: list[int] = []
+        for key in residual.keys():
+            match = re.fullmatch(r"stream(\d+)", str(key))
+            if match is not None:
+                stream_ids.append(int(match.group(1)))
+        if not stream_ids:
+            stream_ids = [0, 1]
+        catalog = self._native_writable_settings_catalog(stream_ids=sorted(set(stream_ids)))
+        by_config_path = {str(entry.get("config_path") or ""): entry for entry in catalog}
 
         image_payload = residual.get("image")
         if isinstance(image_payload, dict):
             residual.pop("image", None)
-            image_field_map = {
-                "brightness": ("image/brightness", "brightness"),
-                "contrast": ("image/contrast", "contrast"),
-                "saturation": ("image/saturation", "saturation"),
-                "sharpness": ("image/sharpness", "sharpness"),
-                "anti_flicker": ("image/anti-flicker", "anti_flicker"),
-                "hflip": ("image/hflip", "hflip"),
-                "vflip": ("image/vflip", "vflip"),
-                "ae_compensation": ("image/ae-compensation", "ae_compensation"),
-                "core_wb_mode": ("image/core-wb-mode", "core_wb_mode"),
-                "wb_rgain": ("image/wb-rgain", "wb_rgain"),
-                "wb_bgain": ("image/wb-bgain", "wb_bgain"),
-            }
             leftover_image: dict[str, Any] = {}
             for field_name, value in image_payload.items():
-                mapped = image_field_map.get(str(field_name))
-                if mapped is None:
+                entry = by_config_path.get(f"image.{field_name}")
+                if entry is None:
                     leftover_image[field_name] = value
                     continue
-                path, body_key = mapped
-                patches.append((path, {body_key: value}))
+                patches.append((str(entry["settings_path"]), {str(entry["body_key"]): value}))
             if leftover_image:
                 residual["image"] = leftover_image
-
-        stream_field_map = {
-            "enabled": ("enabled", "enabled"),
-            "audio_enabled": ("audio-enabled", "audio_enabled"),
-            "width": ("width", "width"),
-            "height": ("height", "height"),
-            "fps": ("fps", "fps"),
-            "bitrate": ("bitrate", "bitrate"),
-            "format": ("format", "format"),
-            "mode": ("mode", "mode"),
-        }
 
         for key in list(residual.keys()):
             if re.fullmatch(r"stream\d+", str(key)) is None:
@@ -1841,64 +1981,111 @@ class Hub:
             stream_payload = residual.pop(key)
             if not isinstance(stream_payload, dict):
                 continue
-
-            for field_name, (path_suffix, body_key) in stream_field_map.items():
-                if field_name not in stream_payload:
+            flat = self._flatten_config_leaves({str(key): stream_payload})
+            consumed: set[str] = set()
+            for config_path, value in flat.items():
+                entry = by_config_path.get(config_path)
+                if entry is None:
                     continue
-                path = self._stream_setting_path(str(key), path_suffix)
-                if path is None:
-                    continue
-                patches.append((path, {body_key: stream_payload[field_name]}))
-
-            osd_payload = stream_payload.get("osd")
-            if not isinstance(osd_payload, dict):
-                continue
-
-            if "enabled" in osd_payload:
-                path = self._stream_setting_path(str(key), "osd", "enabled")
-                if path is not None:
-                    patches.append((path, {"enabled": bool(osd_payload.get("enabled"))}))
-
-            time_payload = osd_payload.get("time")
-            if isinstance(time_payload, dict) and "enabled" in time_payload:
-                path = self._stream_setting_path(str(key), "osd", "time", "enabled")
-                if path is not None:
-                    patches.append((path, {"enabled": bool(time_payload.get("enabled"))}))
-
-            usertext_payload = osd_payload.get("usertext")
-            if isinstance(usertext_payload, dict):
-                if "enabled" in usertext_payload:
-                    path = self._stream_setting_path(str(key), "osd", "usertext", "enabled")
-                    if path is not None:
-                        patches.append((path, {"enabled": bool(usertext_payload.get("enabled"))}))
-                if "format" in usertext_payload:
-                    path = self._stream_setting_path(str(key), "osd", "usertext", "format")
-                    if path is not None:
-                        patches.append((path, {"format": str(usertext_payload.get("format") or "")}))
-
-            privacy_payload = osd_payload.get("privacy")
-            if isinstance(privacy_payload, dict):
-                if "enabled" in privacy_payload:
-                    path = self._stream_setting_path(str(key), "osd", "privacy", "enabled")
-                    if path is not None:
-                        patches.append((path, {"enabled": bool(privacy_payload.get("enabled"))}))
-                if "text" in privacy_payload:
-                    path = self._stream_setting_path(str(key), "osd", "privacy", "text")
-                    if path is not None:
-                        patches.append((path, {"text": str(privacy_payload.get("text") or "")}))
-                for color_key in ("fill_color", "stroke_color"):
-                    if color_key not in privacy_payload:
-                        continue
-                    path = self._stream_setting_path(
-                        str(key),
-                        "osd",
-                        "privacy",
-                        color_key.replace("_", "-"),
-                    )
-                    if path is not None:
-                        patches.append((path, {color_key: str(privacy_payload.get(color_key) or "")}))
+                patches.append((str(entry["settings_path"]), {str(entry["body_key"]): value}))
+                consumed.add(config_path)
+            leftover_flat = {path: value for path, value in flat.items() if path not in consumed}
+            if leftover_flat:
+                leftover_tree = self._unflatten_config_leaves(leftover_flat)
+                leftover_stream = leftover_tree.get(str(key))
+                if isinstance(leftover_stream, dict) and leftover_stream:
+                    residual[str(key)] = leftover_stream
 
         return patches, residual
+
+    def _native_config_stage_plan(self, native_payload: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        """Split a native config payload into labeled write stages."""
+        stages: list[tuple[str, str, dict[str, Any]]] = []
+        if not isinstance(native_payload, dict) or not native_payload:
+            return stages
+        stage_order = [
+            ("image", "Imaging"),
+            ("daynight", "Day / Night"),
+            ("motion", "Motion"),
+        ]
+        used: set[str] = set()
+        for key, label in stage_order:
+            if key in native_payload:
+                stages.append((key, label, {key: native_payload[key]}))
+                used.add(key)
+        for key in sorted(native_payload.keys()):
+            if key in used:
+                continue
+            if re.fullmatch(r"stream\d+", str(key)):
+                stream_num = str(key).replace("stream", "")
+                label = "Main stream" if stream_num == "0" else f"Stream {stream_num}"
+                if stream_num == "1":
+                    label = "Sub stream"
+                stages.append((str(key), label, {key: native_payload[key]}))
+                used.add(key)
+        leftover = {key: value for key, value in native_payload.items() if key not in used}
+        if leftover:
+            stages.append(("other", "Other camera settings", leftover))
+        return stages
+
+    def _setting_values_match(self, expected: Any, observed: Any) -> bool:
+        if expected is None and observed in (None, ""):
+            return True
+        if isinstance(expected, bool) or isinstance(observed, bool):
+            return bool(self._coerce_bool(expected)) == bool(self._coerce_bool(observed))
+        if isinstance(expected, (int, float)) or isinstance(observed, (int, float)):
+            try:
+                return float(expected) == float(observed)
+            except (TypeError, ValueError):
+                return False
+        return str(expected).strip() == str(observed).strip()
+
+    def _confirm_native_config_stage(
+        self,
+        camera: Camera,
+        payload: dict[str, Any],
+        *,
+        timeout_seconds: float = 8.0,
+    ) -> tuple[bool, str]:
+        """Poll narrow /settings leaves until the stage values appear, with backoff."""
+        settings_patches, residual = self._split_native_config_patch_for_settings(payload)
+        if not settings_patches and not residual:
+            return True, "nothing to confirm"
+        client = self._camera_api_client(camera)
+        deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+        delay = 0.4
+        last_detail = "not confirmed yet"
+        while True:
+            mismatches: list[str] = []
+            for path, body in settings_patches:
+                try:
+                    live = client.get_setting(path)
+                except Exception as error:
+                    mismatches.append(f"{path}: {error}")
+                    continue
+                if not isinstance(live, dict):
+                    mismatches.append(f"{path}: non-object response")
+                    continue
+                for key, expected in body.items():
+                    observed = live.get(key)
+                    if key not in live and "value" in live and len(body) == 1:
+                        observed = live.get("value")
+                    elif key not in live:
+                        # Some agents omit echo; treat as pending until timeout.
+                        mismatches.append(f"{path}.{key}: missing")
+                        continue
+                    if not self._setting_values_match(expected, observed):
+                        mismatches.append(f"{path}.{key}: want {expected!r} got {observed!r}")
+            if residual:
+                # Omnibus residual has no cheap leaf confirm; brief settle is enough.
+                time.sleep(min(delay, 1.0))
+            if not mismatches:
+                return True, "confirmed"
+            last_detail = "; ".join(mismatches[:4])
+            if time.monotonic() >= deadline:
+                return False, last_detail
+            time.sleep(delay)
+            delay = min(delay * 2.0, 2.0)
 
     def patch_camera_config(
         self,
@@ -1987,31 +2174,12 @@ class Hub:
         if camera is None:
             raise RuntimeError(f"Unknown camera: {camera_id}")
 
-        stages: list[tuple[str, str, dict[str, Any] | None, str]] = []
-        if isinstance(native_payload, dict) and native_payload:
-            stage_order = [
-                ("image", "Imaging"),
-                ("daynight", "Day / Night"),
-                ("motion", "Motion"),
-            ]
-            used: set[str] = set()
-            for key, label in stage_order:
-                if key in native_payload:
-                    stages.append((key, label, {key: native_payload[key]}, "native"))
-                    used.add(key)
-            for key in sorted(native_payload.keys()):
-                if key in used:
-                    continue
-                if re.fullmatch(r"stream\d+", str(key)):
-                    stream_num = str(key).replace("stream", "")
-                    label = "Main stream" if stream_num == "0" else f"Stream {stream_num}"
-                    if stream_num == "1":
-                        label = "Sub stream"
-                    stages.append((str(key), label, {key: native_payload[key]}, "native"))
-                    used.add(key)
-            leftover = {key: value for key, value in native_payload.items() if key not in used}
-            if leftover:
-                stages.append(("other", "Other camera settings", leftover, "native"))
+        stages: list[tuple[str, str, dict[str, Any] | None, str]] = [
+            (stage_id, label, payload, "native")
+            for stage_id, label, payload in self._native_config_stage_plan(
+                native_payload if isinstance(native_payload, dict) else {}
+            )
+        ]
         if isinstance(send2_payload, dict) and send2_payload:
             stages.append(("send2", "Send2 / motion routing", send2_payload, "send2"))
 
@@ -2020,6 +2188,16 @@ class Hub:
 
         total = len(stages) + 1
         applied_summaries: list[str] = []
+        yield {
+            "event": "plan",
+            "stages": [
+                {"stage_id": stage_id, "label": label, "index": index, "total": total}
+                for index, (stage_id, label, _payload, _kind) in enumerate(stages, start=1)
+            ]
+            + [{"stage_id": "backup", "label": "Config backup", "index": total, "total": total}],
+            "total": total,
+            "message": f"Prepared {len(stages)} write block(s) plus backup",
+        }
         for index, (stage_id, label, payload, kind) in enumerate(stages, start=1):
             yield {
                 "event": "stage_start",
@@ -2038,6 +2216,17 @@ class Hub:
                         backup_after=False,
                     )
                     status = str(result.get("status") or "ok")
+                    yield {
+                        "event": "stage_confirming",
+                        "stage_id": stage_id,
+                        "label": label,
+                        "index": index,
+                        "total": total,
+                        "message": f"Confirming {label}…",
+                    }
+                    confirmed, confirm_detail = self._confirm_native_config_stage(camera, payload or {})
+                    if not confirmed:
+                        raise RuntimeError(f"{label} write was not confirmed ({confirm_detail})")
                     applied_summaries.append(f"{label}: {status}")
                 else:
                     result = self.update_camera_send2_config(
@@ -2066,6 +2255,7 @@ class Hub:
                 "total": total,
                 "message": f"{label} applied",
                 "ok": True,
+                "confirmed": True,
             }
 
         yield {
@@ -2126,6 +2316,211 @@ class Hub:
             "backup_ok": backup_ok,
             "message": complete_message,
             "applied": applied_summaries,
+        }
+
+    def iter_restore_camera_config_backup(
+        self,
+        camera_id: str,
+        snapshot_id: int,
+        *,
+        mode: str = "compatible",
+    ):
+        """Restore a backup in labeled stages with confirm/backoff and progress events."""
+        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        normalized_mode = str(mode or "compatible").strip().lower()
+        if normalized_mode not in {"compatible", "best_effort"}:
+            raise RuntimeError("Restore mode must be 'compatible' or 'best_effort'")
+
+        preview = self.preview_camera_config_restore(resolved, int(snapshot_id))
+        if not preview.get("restore_ready"):
+            raise RuntimeError(
+                str(preview.get("restore_blocked_reason") or "").strip()
+                or "Native API is not ready for config restore yet."
+            )
+        payload = (
+            preview.get("compatible_payload")
+            if normalized_mode == "compatible"
+            else preview.get("best_effort_payload")
+        )
+        if not isinstance(payload, dict) or not payload:
+            raise RuntimeError("Restore plan produced an empty payload")
+
+        with self.state_lock:
+            camera = self.cameras.get(resolved)
+        if camera is None:
+            raise RuntimeError(f"Unknown camera: {camera_id}")
+
+        stages = self._native_config_stage_plan(payload)
+        if not stages:
+            raise RuntimeError("Restore plan produced no write stages")
+        total = len(stages) + 1
+        yield {
+            "event": "plan",
+            "snapshot_id": int(snapshot_id),
+            "mode": normalized_mode,
+            "stages": [
+                {"stage_id": stage_id, "label": label, "index": index, "total": total}
+                for index, (stage_id, label, _payload) in enumerate(stages, start=1)
+            ]
+            + [{"stage_id": "backup", "label": "Config backup", "index": total, "total": total}],
+            "total": total,
+            "message": f"Prepared {len(stages)} restore block(s) plus backup",
+        }
+
+        applied_summaries: list[str] = []
+        for index, (stage_id, label, stage_payload) in enumerate(stages, start=1):
+            yield {
+                "event": "stage_start",
+                "stage_id": stage_id,
+                "label": label,
+                "index": index,
+                "total": total,
+                "message": f"Restoring {label}…",
+            }
+            try:
+                result = self.patch_camera_config(
+                    resolved,
+                    stage_payload,
+                    refresh_after=False,
+                    backup_after=False,
+                )
+                status = str(result.get("status") or "ok")
+                yield {
+                    "event": "stage_confirming",
+                    "stage_id": stage_id,
+                    "label": label,
+                    "index": index,
+                    "total": total,
+                    "message": f"Confirming {label}…",
+                }
+                confirmed, confirm_detail = self._confirm_native_config_stage(camera, stage_payload)
+                if not confirmed:
+                    raise RuntimeError(f"{label} restore was not confirmed ({confirm_detail})")
+                applied_summaries.append(f"{label}: {status}")
+            except Exception as error:
+                yield {
+                    "event": "stage_error",
+                    "stage_id": stage_id,
+                    "label": label,
+                    "index": index,
+                    "total": total,
+                    "message": f"{label} failed: {self._normalize_native_api_error(error)}",
+                    "ok": False,
+                }
+                raise
+            yield {
+                "event": "stage_done",
+                "stage_id": stage_id,
+                "label": label,
+                "index": index,
+                "total": total,
+                "message": f"{label} restored",
+                "ok": True,
+                "confirmed": True,
+            }
+
+        self._schedule_api_refresh(resolved)
+        self._schedule_supported_controls_refresh(resolved)
+        yield {
+            "event": "stage_start",
+            "stage_id": "backup",
+            "label": "Config backup",
+            "index": total,
+            "total": total,
+            "message": "Waiting for camera to settle, then capturing post-restore backup…",
+        }
+        backup_ok = True
+        backup_detail = ""
+        try:
+            time.sleep(5.0)
+            backup_result = self.backup_camera_config(
+                resolved,
+                source="hub_write",
+                label=f"After restore of #{snapshot_id}",
+            )
+            backup_detail = str(backup_result.get("status_detail") or "Config backup stored")
+            yield {
+                "event": "stage_done",
+                "stage_id": "backup",
+                "label": "Config backup",
+                "index": total,
+                "total": total,
+                "message": backup_detail,
+                "ok": True,
+            }
+        except Exception as error:
+            backup_ok = False
+            backup_detail = self._normalize_native_api_error(error)
+            LOG.info("Post-restore backup failed for %s: %s", resolved, error)
+            yield {
+                "event": "stage_error",
+                "stage_id": "backup",
+                "label": "Config backup",
+                "index": total,
+                "total": total,
+                "message": f"Config backup failed: {backup_detail}",
+                "ok": False,
+            }
+
+        self._record_history_action(
+            resolved,
+            "config_restore",
+            "success",
+            f"Restored backup #{snapshot_id} ({normalized_mode})",
+            source="hub",
+            payload_summary=json.dumps(
+                {
+                    "snapshot_id": int(snapshot_id),
+                    "mode": normalized_mode,
+                    "compatible_count": len(preview.get("compatible") or []),
+                    "dropped_count": len(preview.get("dropped") or []),
+                    "conflict_count": len(preview.get("conflicts") or []),
+                    "skipped_secrets_count": len(preview.get("skipped_secrets") or []),
+                    "stages": applied_summaries,
+                    "backup_ok": backup_ok,
+                },
+                sort_keys=True,
+            ),
+        )
+        message = (
+            f"Restored backup #{snapshot_id} using {normalized_mode} mode "
+            f"({len(applied_summaries)} block(s))"
+        )
+        if not backup_ok:
+            message = f"{message}. Config backup failed: {backup_detail}"
+        yield {
+            "event": "complete",
+            "ok": True,
+            "backup_ok": backup_ok,
+            "message": message,
+            "snapshot_id": int(snapshot_id),
+            "mode": normalized_mode,
+            "applied": applied_summaries,
+            "redirect": f"/camera/{resolved}/config-backups",
+        }
+
+    def restore_camera_config_backup(
+        self,
+        camera_id: str,
+        snapshot_id: int,
+        *,
+        mode: str = "compatible",
+    ) -> dict[str, Any]:
+        """Non-streaming restore wrapper; prefers staged apply with confirmation."""
+        final_event: dict[str, Any] = {}
+        for event in self.iter_restore_camera_config_backup(camera_id, snapshot_id, mode=mode):
+            if event.get("event") == "complete":
+                final_event = event
+        if not final_event.get("ok"):
+            raise RuntimeError(str(final_event.get("message") or "Config restore failed"))
+        return {
+            "camera_id": self._resolve_camera_id(camera_id) or str(camera_id).strip().lower(),
+            "snapshot_id": int(snapshot_id),
+            "mode": str(mode or "compatible").strip().lower() or "compatible",
+            "status": "success",
+            "status_detail": str(final_event.get("message") or "Config restore finished"),
+            "backup_ok": bool(final_event.get("backup_ok", True)),
+            "applied": list(final_event.get("applied") or []),
         }
 
     def update_camera_send2_config(
@@ -2217,15 +2612,8 @@ class Hub:
 
         client = self._camera_api_client(camera)
         # Backups often run right after a burst of leaf patches; give the camera time
-        # and use a longer read timeout than routine probes (default 5s is too short).
-        control_timeout = 15
-        control_timeout_fn = getattr(client, "_control_timeout", None)
-        if callable(control_timeout_fn):
-            try:
-                control_timeout = int(control_timeout_fn())
-            except Exception:
-                control_timeout = 15
-        config_payload = client.get_config(timeout=max(control_timeout, 30))
+        # and use a longer read timeout than routine probes (default is too short).
+        config_payload = client.get_config(timeout=self._camera_config_read_timeout(client))
         if not isinstance(config_payload, dict):
             raise RuntimeError("Camera GET /config did not return a JSON object")
         try:
@@ -2387,82 +2775,693 @@ class Hub:
 
         live_capabilities: dict[str, Any] = {}
         live_config: dict[str, Any] = {}
-        if self._camera_api_base_url(camera) and str(camera.api_status or "").strip().lower() != "offline":
+        live_read_error = ""
+        live_config_ok = False
+        live_capabilities_ok = False
+        api_status = str(camera.api_status or "").strip().lower()
+        if self._camera_api_base_url(camera) and api_status != "offline":
             client = self._camera_api_client(camera)
+            config_timeout = self._camera_config_read_timeout(client)
             try:
                 caps = client.get_capabilities()
                 if isinstance(caps, dict):
                     live_capabilities = caps
+                    live_capabilities_ok = True
             except Exception as error:
+                live_read_error = self._normalize_native_api_error(error)
                 LOG.debug("Restore preview capabilities failed for %s: %s", resolved, error, exc_info=True)
             try:
-                cfg = client.get_config()
+                cfg = client.get_config(timeout=config_timeout)
                 if isinstance(cfg, dict):
                     live_config = cfg
+                    live_config_ok = True
             except Exception as error:
+                detail = self._normalize_native_api_error(error)
+                live_read_error = live_read_error or detail
                 LOG.debug("Restore preview config failed for %s: %s", resolved, error, exc_info=True)
+        elif api_status == "offline":
+            live_read_error = "Native API is offline for this camera."
 
         plan = self._build_config_restore_plan(
             snapshot_config=snapshot.get("config") if isinstance(snapshot.get("config"), dict) else {},
             live_capabilities=live_capabilities,
             live_config=live_config,
+            require_live_capabilities=True,
         )
+        restore_blocked_reason = ""
+        if api_status == "offline":
+            restore_blocked_reason = live_read_error or "Native API is offline."
+        elif not live_capabilities_ok and not live_config_ok:
+            restore_blocked_reason = (
+                live_read_error
+                or "Could not read live capabilities/config from the camera. Restore is blocked until the native API answers."
+            )
         return {
             "camera_id": resolved,
             "snapshot": self._config_snapshot_detail_for_ui(snapshot),
             "live_firmware_id": str(camera.api_version or ""),
             "live_streamer": str(camera.api_streamer or ""),
+            "live_api_status": api_status or "unknown",
+            "live_config_ok": live_config_ok,
+            "live_capabilities_ok": live_capabilities_ok,
+            "live_read_error": live_read_error,
+            "restore_ready": not bool(restore_blocked_reason),
+            "restore_blocked_reason": restore_blocked_reason,
             **plan,
         }
 
-    def restore_camera_config_backup(
+    def _camera_config_read_timeout(self, client: Any) -> int:
+        control_timeout = 15
+        control_timeout_fn = getattr(client, "_control_timeout", None)
+        if callable(control_timeout_fn):
+            try:
+                control_timeout = int(control_timeout_fn())
+            except Exception:
+                control_timeout = 15
+        return max(control_timeout, 30)
+
+    def get_camera_config_clone_for_ui(self, camera_id: str) -> dict[str, Any]:
+        camera = self.get_camera_for_ui(camera_id)
+        resolved = str(camera.get("camera_id") or camera_id).strip().lower()
+        peers: list[dict[str, Any]] = []
+        for peer in self.list_cameras_for_ui():
+            peer_id = str(peer.get("camera_id") or "").strip().lower()
+            if not peer_id or peer_id == resolved:
+                continue
+            backups = self.list_camera_config_backups(peer_id, limit=20)
+            peers.append(
+                {
+                    **peer,
+                    "config_backups": backups,
+                    "latest_config_backup": backups[0] if backups else None,
+                }
+            )
+        own_backups = self.list_camera_config_backups(resolved, limit=20)
+        return {
+            **camera,
+            "clone_peers": peers,
+            "config_backups": own_backups,
+            "history_enabled": self.history_store is not None,
+        }
+
+    def preview_camera_config_clone(
         self,
-        camera_id: str,
-        snapshot_id: int,
+        target_camera_id: str,
         *,
-        mode: str = "compatible",
+        source_camera_id: str,
+        source_kind: str = "live",
+        snapshot_id: int | None = None,
     ) -> dict[str, Any]:
-        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        target = self._resolve_camera_id(target_camera_id) or target_camera_id.strip().lower()
+        source = self._resolve_camera_id(source_camera_id) or source_camera_id.strip().lower()
+        if not target or not source:
+            raise RuntimeError("Source and target cameras are required")
+        if target == source and str(source_kind or "").strip().lower() == "live":
+            raise RuntimeError("Cannot clone a camera's live config onto itself; pick a backup or another camera")
+
+        source_payload = self._resolve_config_clone_source(
+            source,
+            source_kind=source_kind,
+            snapshot_id=snapshot_id,
+        )
+        live_capabilities, live_config, live_meta = self._read_camera_live_config_context(target)
+        plan = self._build_config_clone_field_plan(
+            source_config=source_payload.get("config") if isinstance(source_payload.get("config"), dict) else {},
+            live_capabilities=live_capabilities,
+            live_config=live_config,
+        )
+        with self.state_lock:
+            target_cam = self.cameras.get(target)
+            source_cam = self.cameras.get(source)
+        return {
+            "direction": "pull",
+            "target_camera_id": target,
+            "target_name": str(getattr(target_cam, "name", "") or target),
+            "source_camera_id": source,
+            "source_name": str(getattr(source_cam, "name", "") or source),
+            "source_kind": source_payload.get("source_kind"),
+            "source_snapshot_id": source_payload.get("snapshot_id"),
+            "source_label": source_payload.get("label") or "",
+            "source_recorded_at_label": source_payload.get("recorded_at_label") or "",
+            "source_firmware_id": source_payload.get("firmware_id") or "",
+            "source_streamer": source_payload.get("streamer") or "",
+            "live_firmware_id": live_meta.get("firmware_id") or str(getattr(target_cam, "api_version", "") or ""),
+            "live_streamer": live_meta.get("streamer") or str(getattr(target_cam, "api_streamer", "") or ""),
+            **plan,
+        }
+
+    def iter_apply_camera_config_clone(
+        self,
+        target_camera_id: str,
+        *,
+        source_camera_id: str,
+        source_kind: str = "live",
+        snapshot_id: int | None = None,
+        selected_paths: list[str] | None = None,
+        mode: str = "compatible",
+    ):
+        """Clone onto one target in labeled stages with confirm/backoff and progress events."""
         normalized_mode = str(mode or "compatible").strip().lower()
         if normalized_mode not in {"compatible", "best_effort"}:
-            raise RuntimeError("Restore mode must be 'compatible' or 'best_effort'")
+            raise RuntimeError("Clone mode must be 'compatible' or 'best_effort'")
 
-        preview = self.preview_camera_config_restore(resolved, int(snapshot_id))
-        payload = preview.get("compatible_payload") if normalized_mode == "compatible" else preview.get("best_effort_payload")
-        if not isinstance(payload, dict) or not payload:
-            raise RuntimeError("Restore plan produced an empty payload")
+        preview = self.preview_camera_config_clone(
+            target_camera_id,
+            source_camera_id=source_camera_id,
+            source_kind=source_kind,
+            snapshot_id=snapshot_id,
+        )
+        payload = self._payload_from_clone_selection(
+            preview,
+            selected_paths=selected_paths,
+            mode=normalized_mode,
+        )
+        if not payload:
+            raise RuntimeError("Clone selection produced an empty payload")
 
-        result = self.patch_camera_config(resolved, payload, refresh_after=True)
+        target = str(preview.get("target_camera_id") or target_camera_id)
+        source = str(preview.get("source_camera_id") or source_camera_id)
+        with self.state_lock:
+            camera = self.cameras.get(target)
+        if camera is None:
+            raise RuntimeError(f"Unknown camera: {target}")
+
+        stages = self._native_config_stage_plan(payload)
+        if not stages:
+            raise RuntimeError("Clone selection produced no write stages")
+        total = len(stages) + 1
+        source_ref = (
+            f"backup #{preview.get('source_snapshot_id')}"
+            if preview.get("source_kind") == "backup"
+            else "live config"
+        )
+        yield {
+            "event": "plan",
+            "target_camera_id": target,
+            "source_camera_id": source,
+            "mode": normalized_mode,
+            "stages": [
+                {"stage_id": stage_id, "label": label, "index": index, "total": total}
+                for index, (stage_id, label, _payload) in enumerate(stages, start=1)
+            ]
+            + [{"stage_id": "backup", "label": "Config backup", "index": total, "total": total}],
+            "total": total,
+            "message": f"Prepared {len(stages)} clone block(s) plus backup from {source} ({source_ref})",
+        }
+
+        applied_summaries: list[str] = []
+        for index, (stage_id, label, stage_payload) in enumerate(stages, start=1):
+            yield {
+                "event": "stage_start",
+                "stage_id": stage_id,
+                "label": label,
+                "index": index,
+                "total": total,
+                "message": f"Cloning {label}…",
+            }
+            try:
+                result = self.patch_camera_config(
+                    target,
+                    stage_payload,
+                    refresh_after=False,
+                    backup_after=False,
+                )
+                status = str(result.get("status") or "ok")
+                yield {
+                    "event": "stage_confirming",
+                    "stage_id": stage_id,
+                    "label": label,
+                    "index": index,
+                    "total": total,
+                    "message": f"Confirming {label}…",
+                }
+                confirmed, confirm_detail = self._confirm_native_config_stage(camera, stage_payload)
+                if not confirmed:
+                    raise RuntimeError(f"{label} clone was not confirmed ({confirm_detail})")
+                applied_summaries.append(f"{label}: {status}")
+            except Exception as error:
+                yield {
+                    "event": "stage_error",
+                    "stage_id": stage_id,
+                    "label": label,
+                    "index": index,
+                    "total": total,
+                    "message": f"{label} failed: {self._normalize_native_api_error(error)}",
+                    "ok": False,
+                }
+                raise
+            yield {
+                "event": "stage_done",
+                "stage_id": stage_id,
+                "label": label,
+                "index": index,
+                "total": total,
+                "message": f"{label} cloned",
+                "ok": True,
+                "confirmed": True,
+            }
+
+        self._schedule_api_refresh(target)
+        self._schedule_supported_controls_refresh(target)
+        yield {
+            "event": "stage_start",
+            "stage_id": "backup",
+            "label": "Config backup",
+            "index": total,
+            "total": total,
+            "message": "Waiting for camera to settle, then capturing post-clone backup…",
+        }
+        backup_ok = True
+        backup_detail = ""
+        try:
+            time.sleep(5.0)
+            backup_result = self.backup_camera_config(
+                target,
+                source="hub_write",
+                label=f"After clone from {source}",
+            )
+            backup_detail = str(backup_result.get("status_detail") or "Config backup stored")
+            yield {
+                "event": "stage_done",
+                "stage_id": "backup",
+                "label": "Config backup",
+                "index": total,
+                "total": total,
+                "message": backup_detail,
+                "ok": True,
+            }
+        except Exception as error:
+            backup_ok = False
+            backup_detail = self._normalize_native_api_error(error)
+            LOG.info("Post-clone backup failed for %s: %s", target, error)
+            yield {
+                "event": "stage_error",
+                "stage_id": "backup",
+                "label": "Config backup",
+                "index": total,
+                "total": total,
+                "message": f"Config backup failed: {backup_detail}",
+                "ok": False,
+            }
+
+        applied_paths = sorted(self._flatten_config_leaves(payload).keys())
+        detail = f"Cloned {len(applied_paths)} field(s) from {source} ({source_ref}) using {normalized_mode}"
         self._record_history_action(
-            resolved,
-            "config_restore",
+            target,
+            "config_clone",
             "success",
-            f"Restored backup #{snapshot_id} ({normalized_mode})",
+            detail,
             source="hub",
             payload_summary=json.dumps(
                 {
-                    "snapshot_id": int(snapshot_id),
+                    "source_camera_id": source,
+                    "source_kind": preview.get("source_kind"),
+                    "source_snapshot_id": preview.get("source_snapshot_id"),
                     "mode": normalized_mode,
-                    "compatible_count": len(preview.get("compatible") or []),
-                    "dropped_count": len(preview.get("dropped") or []),
-                    "conflict_count": len(preview.get("conflicts") or []),
-                    "skipped_secrets_count": len(preview.get("skipped_secrets") or []),
+                    "selected_count": len(selected_paths) if selected_paths is not None else len(applied_paths),
+                    "applied_paths": applied_paths,
+                    "stages": applied_summaries,
+                    "backup_ok": backup_ok,
                 },
                 sort_keys=True,
             ),
         )
-        try:
-            self.backup_camera_config(resolved, source="hub_write", label=f"After restore of #{snapshot_id}")
-        except Exception:
-            LOG.debug("Post-restore backup failed for %s", resolved, exc_info=True)
-        return {
-            "camera_id": resolved,
-            "snapshot_id": int(snapshot_id),
+        message = detail
+        if not backup_ok:
+            message = f"{message}. Config backup failed: {backup_detail}"
+        yield {
+            "event": "complete",
+            "ok": True,
+            "backup_ok": backup_ok,
+            "message": message,
+            "target_camera_id": target,
+            "source_camera_id": source,
+            "source_kind": preview.get("source_kind"),
+            "source_snapshot_id": preview.get("source_snapshot_id"),
             "mode": normalized_mode,
+            "applied": applied_summaries,
+            "applied_payload": payload,
+            "redirect": f"/camera/{target}/config-backups",
+        }
+
+    def apply_camera_config_clone(
+        self,
+        target_camera_id: str,
+        *,
+        source_camera_id: str,
+        source_kind: str = "live",
+        snapshot_id: int | None = None,
+        selected_paths: list[str] | None = None,
+        mode: str = "compatible",
+    ) -> dict[str, Any]:
+        """Non-streaming clone wrapper; prefers staged apply with confirmation."""
+        final_event: dict[str, Any] = {}
+        for event in self.iter_apply_camera_config_clone(
+            target_camera_id,
+            source_camera_id=source_camera_id,
+            source_kind=source_kind,
+            snapshot_id=snapshot_id,
+            selected_paths=selected_paths,
+            mode=mode,
+        ):
+            if event.get("event") == "complete":
+                final_event = event
+        if not final_event.get("ok"):
+            raise RuntimeError(str(final_event.get("message") or "Config clone failed"))
+        target = str(final_event.get("target_camera_id") or target_camera_id)
+        return {
+            "camera_id": target,
+            "source_camera_id": final_event.get("source_camera_id"),
+            "source_kind": final_event.get("source_kind"),
+            "source_snapshot_id": final_event.get("source_snapshot_id"),
+            "mode": str(mode or "compatible").strip().lower() or "compatible",
             "status": "success",
-            "status_detail": f"Restored backup #{snapshot_id} using {normalized_mode} mode",
-            "preview": preview,
-            "apply_result": result,
+            "status_detail": str(final_event.get("message") or "Config clone finished"),
+            "backup_ok": bool(final_event.get("backup_ok", True)),
+            "applied": list(final_event.get("applied") or []),
+            "applied_payload": final_event.get("applied_payload") or {},
+        }
+
+    def iter_apply_camera_config_clone_push(
+        self,
+        source_camera_id: str,
+        *,
+        target_camera_ids: list[str],
+        source_kind: str = "live",
+        snapshot_id: int | None = None,
+        selected_paths: list[str] | None = None,
+        mode: str = "compatible",
+    ):
+        """Push clone to multiple targets with per-camera staged progress."""
+        source = self._resolve_camera_id(source_camera_id) or source_camera_id.strip().lower()
+        targets: list[str] = []
+        seen: set[str] = set()
+        for raw in target_camera_ids or []:
+            resolved = self._resolve_camera_id(raw) or str(raw or "").strip().lower()
+            if not resolved or resolved in seen:
+                continue
+            if resolved == source and str(source_kind or "").strip().lower() == "live":
+                continue
+            seen.add(resolved)
+            targets.append(resolved)
+        if not targets:
+            raise RuntimeError("Select at least one target camera")
+
+        normalized_mode = str(mode or "compatible").strip().lower() or "compatible"
+        results: list[dict[str, Any]] = []
+        yield {
+            "event": "plan",
+            "source_camera_id": source,
+            "mode": normalized_mode,
+            "targets": targets,
+            "message": f"Prepared clone push to {len(targets)} camera(s)",
+        }
+
+        for target in targets:
+            with self.state_lock:
+                target_cam = self.cameras.get(target)
+            target_name = str(getattr(target_cam, "name", "") or target)
+            yield {
+                "event": "camera_start",
+                "camera_id": target,
+                "label": target_name,
+                "message": f"Pushing to {target_name}…",
+            }
+            camera_ok = True
+            camera_detail = ""
+            applied_paths: list[str] = []
+            try:
+                for event in self.iter_apply_camera_config_clone(
+                    target,
+                    source_camera_id=source,
+                    source_kind=source_kind,
+                    snapshot_id=snapshot_id,
+                    selected_paths=selected_paths,
+                    mode=normalized_mode,
+                ):
+                    if event.get("event") == "plan":
+                        # Prefix nested stages so the UI can list every block across cameras.
+                        nested = []
+                        for stage in event.get("stages") or []:
+                            nested.append(
+                                {
+                                    **stage,
+                                    "stage_id": f"{target}:{stage.get('stage_id')}",
+                                    "label": f"{target_name} — {stage.get('label')}",
+                                }
+                            )
+                        yield {
+                            "event": "camera_plan",
+                            "camera_id": target,
+                            "label": target_name,
+                            "stages": nested,
+                            "message": event.get("message"),
+                        }
+                        continue
+                    if event.get("event") in {"stage_start", "stage_confirming", "stage_done", "stage_error"}:
+                        yield {
+                            **event,
+                            "stage_id": f"{target}:{event.get('stage_id')}",
+                            "label": f"{target_name} — {event.get('label')}",
+                            "camera_id": target,
+                        }
+                        continue
+                    if event.get("event") == "complete":
+                        camera_ok = bool(event.get("ok"))
+                        camera_detail = str(event.get("message") or "")
+                        applied_paths = sorted(
+                            self._flatten_config_leaves(event.get("applied_payload") or {}).keys()
+                        )
+            except Exception as error:
+                camera_ok = False
+                camera_detail = self._normalize_native_api_error(error)
+                yield {
+                    "event": "stage_error",
+                    "stage_id": f"{target}:error",
+                    "label": target_name,
+                    "camera_id": target,
+                    "message": camera_detail,
+                    "ok": False,
+                }
+
+            results.append(
+                {
+                    "camera_id": target,
+                    "status": "success" if camera_ok else "error",
+                    "status_detail": camera_detail,
+                    "applied_paths": applied_paths,
+                }
+            )
+            yield {
+                "event": "camera_done",
+                "camera_id": target,
+                "label": target_name,
+                "ok": camera_ok,
+                "message": camera_detail or (f"{target_name} done" if camera_ok else f"{target_name} failed"),
+            }
+
+        success_count = sum(1 for row in results if row.get("status") == "success")
+        status = "success" if success_count == len(results) else ("partial" if success_count else "error")
+        yield {
+            "event": "complete",
+            "ok": status != "error",
+            "status": status,
+            "message": f"Pushed clone to {success_count}/{len(results)} camera(s)",
+            "source_camera_id": source,
+            "source_kind": str(source_kind or "live").strip().lower() or "live",
+            "source_snapshot_id": int(snapshot_id) if snapshot_id is not None else None,
+            "mode": normalized_mode,
+            "results": results,
+            "success_count": success_count,
+            "error_count": len(results) - success_count,
+            "redirect": f"/camera/{source}/config-backups",
+        }
+
+    def apply_camera_config_clone_push(
+        self,
+        source_camera_id: str,
+        *,
+        target_camera_ids: list[str],
+        source_kind: str = "live",
+        snapshot_id: int | None = None,
+        selected_paths: list[str] | None = None,
+        mode: str = "compatible",
+    ) -> dict[str, Any]:
+        final_event: dict[str, Any] = {}
+        for event in self.iter_apply_camera_config_clone_push(
+            source_camera_id,
+            target_camera_ids=target_camera_ids,
+            source_kind=source_kind,
+            snapshot_id=snapshot_id,
+            selected_paths=selected_paths,
+            mode=mode,
+        ):
+            if event.get("event") == "complete":
+                final_event = event
+        return {
+            "source_camera_id": final_event.get("source_camera_id") or source_camera_id,
+            "source_kind": final_event.get("source_kind") or str(source_kind or "live").strip().lower() or "live",
+            "source_snapshot_id": final_event.get("source_snapshot_id"),
+            "mode": final_event.get("mode") or str(mode or "compatible").strip().lower() or "compatible",
+            "status": final_event.get("status") or ("success" if final_event.get("ok") else "error"),
+            "status_detail": str(final_event.get("message") or "Config clone push finished"),
+            "results": list(final_event.get("results") or []),
+            "success_count": int(final_event.get("success_count") or 0),
+            "error_count": int(final_event.get("error_count") or 0),
+        }
+
+    def preview_camera_config_clone_push(
+        self,
+        source_camera_id: str,
+        *,
+        target_camera_ids: list[str],
+        source_kind: str = "live",
+        snapshot_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Build a push preview: field list from source, plus per-target compatibility."""
+        source = self._resolve_camera_id(source_camera_id) or source_camera_id.strip().lower()
+        source_payload = self._resolve_config_clone_source(
+            source,
+            source_kind=source_kind,
+            snapshot_id=snapshot_id,
+        )
+        targets: list[str] = []
+        seen: set[str] = set()
+        for raw in target_camera_ids or []:
+            resolved = self._resolve_camera_id(raw) or str(raw or "").strip().lower()
+            if not resolved or resolved in seen or resolved == source:
+                continue
+            seen.add(resolved)
+            targets.append(resolved)
+        if not targets:
+            raise RuntimeError("Select at least one target camera")
+
+        # Field catalog from source (secrets already stripped in plan helpers).
+        cleaned, secret_paths = self._strip_restore_secrets(
+            self._normalize_config_for_field_ops(
+                source_payload.get("config") if isinstance(source_payload.get("config"), dict) else {}
+            )
+        )
+        source_fields = []
+        for path, value in sorted(self._flatten_config_leaves(cleaned).items()):
+            source_fields.append(
+                {
+                    "path": path,
+                    "group": path.split(".", 1)[0],
+                    "summary": self._restore_value_summary(value),
+                    "value": value,
+                }
+            )
+
+        target_previews: list[dict[str, Any]] = []
+        for target in targets:
+            target_previews.append(
+                self.preview_camera_config_clone(
+                    target,
+                    source_camera_id=source,
+                    source_kind=source_kind,
+                    snapshot_id=snapshot_id,
+                )
+            )
+
+        # Default selection: intersection of compatible paths across all targets.
+        if target_previews:
+            common = set(target_previews[0].get("default_selected_paths") or [])
+            for preview in target_previews[1:]:
+                common &= set(preview.get("default_selected_paths") or [])
+        else:
+            common = set()
+
+        # Unified field list for multi-target checkbox UI.
+        path_status: dict[str, str] = {}
+        path_meta: dict[str, dict[str, Any]] = {}
+        for field in source_fields:
+            path = str(field.get("path") or "")
+            path_meta[path] = field
+            in_compatible = 0
+            in_best_effort = 0
+            for preview in target_previews:
+                if path in (preview.get("compatible_flat") or {}):
+                    in_compatible += 1
+                if path in (preview.get("best_effort_flat") or {}):
+                    in_best_effort += 1
+            if in_compatible == len(target_previews):
+                path_status[path] = "compatible"
+            elif in_best_effort == len(target_previews):
+                path_status[path] = "conflict"
+            elif in_best_effort > 0:
+                path_status[path] = "dropped"
+            else:
+                path_status[path] = "dropped"
+
+        compatible: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        compatible_flat: dict[str, Any] = {}
+        best_effort_flat: dict[str, Any] = {}
+        for path, status in path_status.items():
+            meta = path_meta.get(path) or {"path": path, "group": path.split(".", 1)[0], "summary": "", "value": None}
+            entry = {
+                "path": path,
+                "group": meta.get("group") or path.split(".", 1)[0],
+                "summary": meta.get("summary") or "",
+                "value": meta.get("value"),
+                "status": status,
+            }
+            if status == "compatible":
+                compatible.append(entry)
+                compatible_flat[path] = meta.get("value")
+                best_effort_flat[path] = meta.get("value")
+            elif status == "conflict":
+                conflicts.append({**entry, "reason": "Not compatible on every target; available in best-effort"})
+                best_effort_flat[path] = meta.get("value")
+            else:
+                dropped.append({**entry, "reason": "Unavailable on one or more targets"})
+                if path in best_effort_flat or any(
+                    path in (preview.get("best_effort_flat") or {}) for preview in target_previews
+                ):
+                    best_effort_flat[path] = meta.get("value")
+
+        groups = sorted({item["group"] for item in compatible + conflicts + dropped})
+        fields_by_group: dict[str, dict[str, list[dict[str, Any]]]] = {
+            group: {"compatible": [], "conflicts": [], "dropped": []} for group in groups
+        }
+        for item in compatible:
+            fields_by_group[item["group"]]["compatible"].append(item)
+        for item in conflicts:
+            fields_by_group[item["group"]]["conflicts"].append(item)
+        for item in dropped:
+            fields_by_group[item["group"]]["dropped"].append(item)
+
+        with self.state_lock:
+            source_cam = self.cameras.get(source)
+        return {
+            "direction": "push",
+            "source_camera_id": source,
+            "source_name": str(getattr(source_cam, "name", "") or source),
+            "source_kind": source_payload.get("source_kind"),
+            "source_snapshot_id": source_payload.get("snapshot_id"),
+            "source_label": source_payload.get("label") or "",
+            "source_recorded_at_label": source_payload.get("recorded_at_label") or "",
+            "source_firmware_id": source_payload.get("firmware_id") or "",
+            "source_streamer": source_payload.get("streamer") or "",
+            "source_fields": source_fields,
+            "skipped_secrets": [{"path": path, "reason": "Pairing/secret field is owned by hub enrollment"} for path in secret_paths],
+            "skipped_secrets_count": len(secret_paths),
+            "targets": target_previews,
+            "target_count": len(target_previews),
+            "fields": compatible + conflicts + dropped,
+            "fields_by_group": fields_by_group,
+            "compatible": compatible,
+            "conflicts": conflicts,
+            "dropped": dropped,
+            "compatible_flat": compatible_flat,
+            "best_effort_flat": best_effort_flat,
+            "compatible_count": len(compatible),
+            "conflict_count": len(conflicts),
+            "dropped_count": len(dropped),
+            "groups": groups,
+            "default_selected_paths": sorted(common),
         }
 
     def get_camera_config_backups_for_ui(self, camera_id: str) -> dict[str, Any]:
@@ -2535,6 +3534,7 @@ class Hub:
         snapshot_config: dict[str, Any],
         live_capabilities: dict[str, Any],
         live_config: dict[str, Any],
+        require_live_capabilities: bool = False,
     ) -> dict[str, Any]:
         skipped_secrets: list[dict[str, str]] = []
         compatible: list[dict[str, Any]] = []
@@ -2542,6 +3542,9 @@ class Hub:
         conflicts: list[dict[str, Any]] = []
         compatible_payload: dict[str, Any] = {}
         best_effort_payload: dict[str, Any] = {}
+
+        snapshot_config = self._normalize_config_for_field_ops(snapshot_config)
+        live_config = self._normalize_config_for_field_ops(live_config)
 
         cleaned, secret_paths = self._strip_restore_secrets(snapshot_config)
         for path in secret_paths:
@@ -2557,11 +3560,39 @@ class Hub:
         if "streams" in capability_groups or "stream" in capability_groups:
             capability_groups.update({"stream0", "stream1", "stream2", "stream3"})
 
+        # When live capabilities could not be read, do not treat every group as compatible.
+        # That previously caused huge restore payloads right after OTA while the agent was wedged.
+        if require_live_capabilities and not capability_groups:
+            for key, value in cleaned.items():
+                path = str(key)
+                entry = {
+                    "path": path,
+                    "group": self._restore_capability_group_for_key(path),
+                    "summary": self._restore_value_summary(value),
+                    "reason": "Live capabilities unavailable; restore blocked until native API answers",
+                }
+                dropped.append(entry)
+            return {
+                "compatible": compatible,
+                "dropped": dropped,
+                "conflicts": conflicts,
+                "skipped_secrets": skipped_secrets,
+                "compatible_payload": compatible_payload,
+                "best_effort_payload": best_effort_payload,
+                "compatible_count": 0,
+                "dropped_count": len(dropped),
+                "conflict_count": 0,
+                "skipped_secrets_count": len(skipped_secrets),
+            }
+
         for key, value in cleaned.items():
             path = str(key)
             group = self._restore_capability_group_for_key(path)
             peelable = path in known_groups or bool(re.fullmatch(r"stream\d+", path))
-            caps_ok = (not capability_groups) or (group in capability_groups) or (path in capability_groups)
+            # Empty capability maps used to make caps_ok True for every key.
+            caps_ok = bool(capability_groups) and (
+                (group in capability_groups) or (path in capability_groups)
+            )
 
             conflict = self._restore_value_conflict(path, value, live_capabilities, live_config)
             entry = {
@@ -2686,6 +3717,359 @@ class Hub:
             return f"list({len(value)} items)"
         text = str(value)
         return text if len(text) <= 80 else text[:77] + "..."
+
+    def _flatten_config_leaves(self, node: Any, prefix: str = "") -> dict[str, Any]:
+        if isinstance(node, dict):
+            if not node:
+                return {prefix: {}} if prefix else {}
+            out: dict[str, Any] = {}
+            for key, value in node.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                out.update(self._flatten_config_leaves(value, path))
+            return out
+        if isinstance(node, list):
+            if not prefix:
+                return {}
+            if not node:
+                return {prefix: []}
+            out = {}
+            for index, item in enumerate(node):
+                out.update(self._flatten_config_leaves(item, f"{prefix}.{index}"))
+            return out
+        if not prefix:
+            return {}
+        return {prefix: node}
+
+    def _unflatten_config_leaves(self, flat: dict[str, Any]) -> dict[str, Any]:
+        root: dict[str, Any] = {}
+        for path, value in flat.items():
+            parts = [part for part in str(path).split(".") if part]
+            if not parts:
+                continue
+            cursor: Any = root
+            for index, part in enumerate(parts[:-1]):
+                next_part = parts[index + 1]
+                child_is_list = next_part.isdigit()
+                if part.isdigit():
+                    idx = int(part)
+                    if not isinstance(cursor, list):
+                        break
+                    while len(cursor) <= idx:
+                        cursor.append([] if child_is_list else {})
+                    if child_is_list and not isinstance(cursor[idx], list):
+                        cursor[idx] = []
+                    elif (not child_is_list) and not isinstance(cursor[idx], dict):
+                        cursor[idx] = {}
+                    cursor = cursor[idx]
+                    continue
+                if not isinstance(cursor, dict):
+                    break
+                existing = cursor.get(part)
+                if child_is_list:
+                    if not isinstance(existing, list):
+                        existing = []
+                        cursor[part] = existing
+                else:
+                    if not isinstance(existing, dict):
+                        existing = {}
+                        cursor[part] = existing
+                cursor = existing
+            leaf = parts[-1]
+            if leaf.isdigit() and isinstance(cursor, list):
+                idx = int(leaf)
+                while len(cursor) <= idx:
+                    cursor.append(None)
+                cursor[idx] = value
+            elif isinstance(cursor, dict):
+                cursor[leaf] = value
+        return root
+
+    def _normalize_config_for_field_ops(self, config: dict[str, Any] | None) -> dict[str, Any]:
+        """Map Raptor `streams: [{id:0,...}]` into peel-friendly `stream0` keys."""
+        if not isinstance(config, dict):
+            return {}
+        out = copy.deepcopy(config)
+        streams = out.get("streams")
+        if not isinstance(streams, list):
+            return out
+        out.pop("streams", None)
+        for index, item in enumerate(streams):
+            if not isinstance(item, dict):
+                continue
+            stream_id = item.get("id")
+            if isinstance(stream_id, int) and stream_id >= 0:
+                name = f"stream{stream_id}"
+            else:
+                name = f"stream{index}"
+            cleaned = {key: value for key, value in item.items() if str(key).strip().lower() != "id"}
+            existing = out.get(name)
+            if isinstance(existing, dict):
+                merged = dict(existing)
+                merged.update(cleaned)
+                out[name] = merged
+            else:
+                out[name] = cleaned
+        return out
+
+    def _nested_value_at(self, node: Any, path: str) -> Any:
+        cursor = node
+        for part in str(path).split("."):
+            if not part:
+                continue
+            if part.isdigit() and isinstance(cursor, list):
+                idx = int(part)
+                if idx < 0 or idx >= len(cursor):
+                    return None
+                cursor = cursor[idx]
+                continue
+            if not isinstance(cursor, dict) or part not in cursor:
+                return None
+            cursor = cursor[part]
+        return cursor
+
+    def _read_camera_live_config_context(
+        self,
+        camera_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+        resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()
+        with self.state_lock:
+            camera = self.cameras.get(resolved)
+        if camera is None:
+            raise RuntimeError(f"Unknown camera: {camera_id}")
+
+        live_capabilities: dict[str, Any] = {}
+        live_config: dict[str, Any] = {}
+        firmware_id = str(getattr(camera, "api_version", "") or "")
+        streamer = str(getattr(camera, "api_streamer", "") or "")
+        if self._camera_api_base_url(camera) and str(camera.api_status or "").strip().lower() != "offline":
+            client = self._camera_api_client(camera)
+            try:
+                caps = client.get_capabilities()
+                if isinstance(caps, dict):
+                    live_capabilities = caps
+            except Exception as error:
+                LOG.debug("Clone capabilities failed for %s: %s", resolved, error, exc_info=True)
+            try:
+                cfg = client.get_config(timeout=self._camera_config_read_timeout(client))
+                if isinstance(cfg, dict):
+                    live_config = cfg
+            except Exception as error:
+                LOG.debug("Clone live config failed for %s: %s", resolved, error, exc_info=True)
+            try:
+                device = client.get_device()
+            except Exception:
+                device = {}
+            if isinstance(device, dict):
+                software = device.get("software") if isinstance(device.get("software"), dict) else {}
+                firmware_id = str(
+                    (software or {}).get("firmware_version") or device.get("firmware_version") or firmware_id
+                ).strip()
+                streamer = str((software or {}).get("streamer") or streamer).strip()
+        return live_capabilities, live_config, {"firmware_id": firmware_id, "streamer": streamer}
+
+    def _resolve_config_clone_source(
+        self,
+        source_camera_id: str,
+        *,
+        source_kind: str = "live",
+        snapshot_id: int | None = None,
+    ) -> dict[str, Any]:
+        resolved = self._resolve_camera_id(source_camera_id) or source_camera_id.strip().lower()
+        kind = str(source_kind or "live").strip().lower() or "live"
+        if kind not in {"live", "backup"}:
+            raise RuntimeError("Clone source must be 'live' or 'backup'")
+
+        with self.state_lock:
+            camera = self.cameras.get(resolved)
+        if camera is None:
+            raise RuntimeError(f"Unknown source camera: {source_camera_id}")
+
+        if kind == "backup":
+            if snapshot_id is None:
+                raise RuntimeError("Backup clone source requires snapshot_id")
+            if self.history_store is None:
+                raise RuntimeError("History database is disabled")
+            snapshot = self.history_store.get_config_snapshot(resolved, int(snapshot_id))
+            if snapshot is None:
+                raise RuntimeError(f"Unknown config backup: {snapshot_id}")
+            recorded_at = self._coerce_int(snapshot.get("recorded_at"))
+            return {
+                "source_kind": "backup",
+                "snapshot_id": int(snapshot.get("id") or snapshot_id),
+                "label": str(snapshot.get("label") or ""),
+                "recorded_at": recorded_at,
+                "recorded_at_label": self._format_timestamp(recorded_at) if recorded_at else "",
+                "firmware_id": str(snapshot.get("firmware_id") or ""),
+                "streamer": str(snapshot.get("streamer") or ""),
+                "config": snapshot.get("config") if isinstance(snapshot.get("config"), dict) else {},
+            }
+
+        live_capabilities, live_config, meta = self._read_camera_live_config_context(resolved)
+        if not live_config:
+            raise RuntimeError(f"Could not read live config from {resolved}")
+        return {
+            "source_kind": "live",
+            "snapshot_id": None,
+            "label": "Live config",
+            "recorded_at": int(time.time()),
+            "recorded_at_label": "live",
+            "firmware_id": meta.get("firmware_id") or "",
+            "streamer": meta.get("streamer") or "",
+            "config": live_config,
+            "capabilities": live_capabilities,
+        }
+
+    def _build_config_clone_field_plan(
+        self,
+        *,
+        source_config: dict[str, Any],
+        live_capabilities: dict[str, Any],
+        live_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        skipped_secrets: list[dict[str, str]] = []
+        compatible: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        compatible_flat: dict[str, Any] = {}
+        best_effort_flat: dict[str, Any] = {}
+
+        source_config = self._normalize_config_for_field_ops(source_config)
+        live_config = self._normalize_config_for_field_ops(live_config)
+
+        cleaned, secret_paths = self._strip_restore_secrets(source_config)
+        for path in secret_paths:
+            skipped_secrets.append({"path": path, "reason": "Pairing/secret field is owned by hub enrollment"})
+
+        known_groups = self._restorable_config_groups()
+        capability_groups = {
+            str(key).strip().lower()
+            for key in live_capabilities.keys()
+            if str(key).strip()
+        }
+        if "streams" in capability_groups or "stream" in capability_groups:
+            capability_groups.update({"stream0", "stream1", "stream2", "stream3"})
+
+        for path, value in sorted(self._flatten_config_leaves(cleaned).items()):
+            top = path.split(".", 1)[0]
+            group = self._restore_capability_group_for_key(top)
+            peelable = top in known_groups or bool(re.fullmatch(r"stream\d+", top))
+            caps_ok = bool(capability_groups) and (
+                (group in capability_groups) or (top in capability_groups)
+            )
+            conflict = self._restore_leaf_conflict(path, value, live_capabilities, live_config)
+            entry = {
+                "path": path,
+                "group": top,
+                "summary": self._restore_value_summary(value),
+                "value": value,
+            }
+            if conflict:
+                conflicts.append({**entry, "reason": conflict, "status": "conflict"})
+                if peelable:
+                    best_effort_flat[path] = value
+                continue
+            if caps_ok or peelable:
+                compatible.append({**entry, "status": "compatible"})
+                compatible_flat[path] = value
+                best_effort_flat[path] = value
+            elif peelable:
+                dropped.append(
+                    {
+                        **entry,
+                        "reason": "Not advertised by live capabilities; peelable in best-effort mode",
+                        "status": "dropped",
+                    }
+                )
+                best_effort_flat[path] = value
+            else:
+                dropped.append(
+                    {
+                        **entry,
+                        "reason": "No matching live capability and not in restore map",
+                        "status": "dropped",
+                    }
+                )
+
+        groups = sorted({item["group"] for item in compatible + dropped + conflicts})
+        fields_by_group: dict[str, dict[str, list[dict[str, Any]]]] = {
+            group: {"compatible": [], "conflicts": [], "dropped": []} for group in groups
+        }
+        for item in compatible:
+            fields_by_group[item["group"]]["compatible"].append(item)
+        for item in conflicts:
+            fields_by_group[item["group"]]["conflicts"].append(item)
+        for item in dropped:
+            fields_by_group[item["group"]]["dropped"].append(item)
+        return {
+            "fields": compatible + conflicts + dropped,
+            "fields_by_group": fields_by_group,
+            "compatible": compatible,
+            "dropped": dropped,
+            "conflicts": conflicts,
+            "skipped_secrets": skipped_secrets,
+            "compatible_payload": self._unflatten_config_leaves(compatible_flat),
+            "best_effort_payload": self._unflatten_config_leaves(best_effort_flat),
+            "compatible_flat": compatible_flat,
+            "best_effort_flat": best_effort_flat,
+            "compatible_count": len(compatible),
+            "dropped_count": len(dropped),
+            "conflict_count": len(conflicts),
+            "skipped_secrets_count": len(skipped_secrets),
+            "groups": groups,
+            "default_selected_paths": sorted(compatible_flat.keys()),
+        }
+
+    def _restore_leaf_conflict(
+        self,
+        path: str,
+        value: Any,
+        live_capabilities: dict[str, Any],
+        live_config: dict[str, Any],
+    ) -> str:
+        parts = [part for part in str(path).split(".") if part]
+        if not parts:
+            return ""
+        top = parts[0]
+        group = self._restore_capability_group_for_key(top)
+        caps = live_capabilities.get(group)
+        if isinstance(caps, dict) and len(parts) >= 2:
+            fields = caps.get("fields") if isinstance(caps.get("fields"), dict) else caps
+            if isinstance(fields, dict):
+                field_cap = fields.get(parts[1])
+                if isinstance(field_cap, dict):
+                    allowed = field_cap.get("enum") or field_cap.get("values") or field_cap.get("allowed")
+                    if isinstance(allowed, list) and allowed and value not in allowed:
+                        return f"{path}={value!r} not in allowed {allowed!r}"
+
+        live_value = self._nested_value_at(live_config, path)
+        if live_value is not None and type(live_value) is not type(value) and not (
+            isinstance(live_value, (int, float)) and isinstance(value, (int, float))
+        ):
+            if isinstance(live_value, dict) != isinstance(value, dict) or isinstance(live_value, list) != isinstance(
+                value, list
+            ):
+                return (
+                    f"{path} shape mismatch: source is {type(value).__name__}, "
+                    f"live is {type(live_value).__name__}"
+                )
+        return ""
+
+    def _payload_from_clone_selection(
+        self,
+        preview: dict[str, Any],
+        *,
+        selected_paths: list[str] | None,
+        mode: str,
+    ) -> dict[str, Any]:
+        allowed = preview.get("compatible_flat") if mode == "compatible" else preview.get("best_effort_flat")
+        if not isinstance(allowed, dict):
+            allowed = {}
+        if selected_paths is None:
+            chosen = dict(allowed)
+        else:
+            wanted = {str(path).strip() for path in selected_paths if str(path).strip()}
+            chosen = {path: value for path, value in allowed.items() if path in wanted}
+        return self._unflatten_config_leaves(chosen)
 
     def _is_timeout_error(self, error: Exception) -> bool:
         message = str(error or "").strip().lower()
@@ -3630,6 +5014,7 @@ class Hub:
             "native_send2_motion_sensitivity": "",
             "native_send2_motion_cooldown": "",
             "native_send2_services": [],
+            "osd_position_choices": self._osd_position_choices(),
             "config_patch_example": json.dumps({"image": {"brightness": 128}}, indent=2),
         }
 
@@ -3703,16 +5088,30 @@ class Hub:
                         self._fetch_setting_fields(client, "streams", str(stream_id), field),
                     )
 
-            # Routine hydrate only needs a few OSD toggles; deeper privacy OSD stays on Settings.
+            # Hydrate OSD leaves marked ui=True in the writable settings catalog.
             osd: dict[str, Any] = {}
-            self._merge_setting_fields(osd, self._fetch_setting_fields(client, "streams", str(stream_id), "osd", "enabled"))
-            time_osd = self._fetch_setting_fields(client, "streams", str(stream_id), "osd", "time", "enabled")
-            if time_osd:
-                osd["time"] = time_osd
-            usertext = self._fetch_setting_fields(client, "streams", str(stream_id), "osd", "usertext", "enabled")
-            usertext_format = self._fetch_setting_fields(client, "streams", str(stream_id), "osd", "usertext", "format")
-            if usertext or usertext_format:
-                osd["usertext"] = {**usertext, **usertext_format}
+            stream_prefix = f"stream{int(stream_id)}."
+            for entry in self._native_writable_settings_catalog(stream_ids=[int(stream_id)]):
+                if not entry.get("ui"):
+                    continue
+                config_path = str(entry.get("config_path") or "")
+                if not config_path.startswith(stream_prefix):
+                    continue
+                relative = config_path[len(stream_prefix) :]
+                if not relative.startswith("osd."):
+                    continue
+                fields = client.try_get_setting(str(entry.get("settings_path") or ""))
+                if not isinstance(fields, dict) or not fields:
+                    continue
+                node: dict[str, Any] = osd
+                parts = relative.split(".")
+                for part in parts[1:-1]:
+                    next_node = node.get(part)
+                    if not isinstance(next_node, dict):
+                        next_node = {}
+                        node[part] = next_node
+                    node = next_node
+                self._merge_setting_fields(node, fields)
             if osd:
                 stream_config["osd"] = osd
             streams.append(stream_config)
@@ -3818,6 +5217,8 @@ class Hub:
                     continue
                 live_stream_config = live_stream_payloads.get(stream_name) or {}
                 osd_config = stream_config.get("osd") or {}
+                time_config = (osd_config.get("time") or {}) if isinstance(osd_config, dict) else {}
+                usertext_config = (osd_config.get("usertext") or {}) if isinstance(osd_config, dict) else {}
                 privacy_config = (osd_config.get("privacy") or {}) if isinstance(osd_config, dict) else {}
                 privacy_fill_color_value, privacy_fill_alpha = self._split_hex_color_alpha(privacy_config.get("fill_color"))
                 privacy_stroke_color_value, privacy_stroke_alpha = self._split_hex_color_alpha(privacy_config.get("stroke_color"))
@@ -3869,16 +5270,22 @@ class Hub:
                         "mode": str(stream_config.get("mode") or live_stream_config.get("mode") or "").strip(),
                         "osd_enabled_supported": isinstance(osd_config, dict) and "enabled" in osd_config,
                         "osd_enabled": bool(self._coerce_bool((osd_config or {}).get("enabled"))),
-                        "osd_time_enabled_supported": isinstance((osd_config or {}).get("time"), dict) and "enabled" in (((osd_config or {}).get("time")) or {}),
-                        "osd_time_enabled": bool(self._coerce_bool((((osd_config or {}).get("time") or {}).get("enabled")))),
-                        "osd_usertext_enabled_supported": isinstance((osd_config or {}).get("usertext"), dict) and "enabled" in (((osd_config or {}).get("usertext")) or {}),
-                        "osd_usertext_enabled": bool(self._coerce_bool((((osd_config or {}).get("usertext") or {}).get("enabled")))),
-                        "osd_usertext_format_supported": isinstance((osd_config or {}).get("usertext"), dict) and "format" in (((osd_config or {}).get("usertext")) or {}),
-                        "osd_usertext_format": str((((osd_config or {}).get("usertext") or {}).get("format") or "")).strip(),
+                        "osd_time_enabled_supported": isinstance(time_config, dict) and "enabled" in time_config,
+                        "osd_time_enabled": bool(self._coerce_bool(time_config.get("enabled"))),
+                        "osd_time_position_supported": isinstance(time_config, dict) and "position" in time_config,
+                        "osd_time_position": str(time_config.get("position") or "").strip(),
+                        "osd_usertext_enabled_supported": isinstance(usertext_config, dict) and "enabled" in usertext_config,
+                        "osd_usertext_enabled": bool(self._coerce_bool(usertext_config.get("enabled"))),
+                        "osd_usertext_format_supported": isinstance(usertext_config, dict) and "format" in usertext_config,
+                        "osd_usertext_format": str(usertext_config.get("format") or "").strip(),
+                        "osd_usertext_position_supported": isinstance(usertext_config, dict) and "position" in usertext_config,
+                        "osd_usertext_position": str(usertext_config.get("position") or "").strip(),
                         "osd_privacy_enabled_supported": isinstance(privacy_config, dict) and "enabled" in privacy_config,
                         "osd_privacy_enabled": bool(self._coerce_bool((privacy_config or {}).get("enabled"))),
                         "osd_privacy_text_supported": isinstance(privacy_config, dict) and "text" in privacy_config,
                         "osd_privacy_text": str((privacy_config or {}).get("text") or "").strip(),
+                        "osd_privacy_position_supported": isinstance(privacy_config, dict) and "position" in privacy_config,
+                        "osd_privacy_position": str((privacy_config or {}).get("position") or "").strip(),
                         "osd_privacy_fill_color_supported": isinstance(privacy_config, dict) and "fill_color" in privacy_config,
                         "osd_privacy_fill_color": str((privacy_config or {}).get("fill_color") or "").strip(),
                         "osd_privacy_fill_color_value": privacy_fill_color_value,
@@ -4044,7 +5451,37 @@ class Hub:
             )
         ):
             return "Native API is not available on this camera build."
+        if "errno 111" in lowered or "connection refused" in lowered:
+            return (
+                "Native API connection refused — the hub agent is not accepting "
+                "HTTPS on port 1998 yet (pair/install the token on the camera, then restart the agent)."
+            )
+        if "timed out" in lowered or "timeout" in lowered:
+            return "Native API timed out — camera did not answer on the agent HTTPS port."
+        if "invalid json response" in lowered or "expecting value" in lowered or "empty response for" in lowered:
+            return (
+                "Native API returned a non-JSON or empty response — often the agent is still "
+                "restarting after pairing/OTA, a wrong token, or GET /config is overloaded. "
+                "Wait for Native API online, then retry restore."
+            )
         return message
+
+    def _is_native_api_unreachable_error(self, error: Exception | str) -> bool:
+        normalized = self._normalize_native_api_error(error).lower()
+        markers = (
+            "connection refused",
+            "timed out",
+            "timeout",
+            "unreachable",
+            "non-json",
+            "invalid json",
+            "unauthorized",
+            "http 401",
+            "http 403",
+            "ssl",
+            "certificate",
+        )
+        return any(marker in normalized for marker in markers)
 
     def _is_native_api_unauthorized_error(self, error: Exception | str) -> bool:
         normalized = self._normalize_native_api_error(error).lower()
@@ -6243,7 +7680,68 @@ class Hub:
             "default_onvif_username": self.default_onvif_username,
             "default_onvif_password": self.default_onvif_password,
             "can_delete": True,
+            "migration_offer": self.get_camera_migration_offer(resolved),
+            "api_recovery": self.get_camera_api_recovery_guide(
+                camera,
+                api_status=api_status,
+                api_error=api_error,
+                is_paired=is_paired,
+                setup_status=setup_status,
+            ),
             **self._camera_config_backup_prompt_for_ui(resolved, is_paired=is_paired),
+        }
+
+    def get_camera_api_recovery_guide(
+        self,
+        camera: Camera,
+        *,
+        api_status: str,
+        api_error: str,
+        is_paired: bool,
+        setup_status: str,
+    ) -> dict[str, Any] | None:
+        """Ordered recovery steps when native API is unreachable after OTA/migrate/pair."""
+        status = str(api_status or "").strip().lower()
+        if status in {"online", "unsupported"}:
+            return None
+        if not str(camera.ip or "").strip():
+            return None
+        # Don't nag during early connect before the user has even tried.
+        if setup_status in {"connect", "verifying"} and not is_paired and not api_error:
+            return None
+
+        web_ui = ""
+        try:
+            web_ui = self._camera_web_ui_url(camera) or ""
+        except Exception:
+            web_ui = ""
+        if not web_ui:
+            web_ui = f"http://{str(camera.ip).strip()}/"
+
+        reason = str(api_error or "").strip() or f"Native API is {status or 'offline'}"
+        phase = "pair"
+        if is_paired:
+            phase = "agent"
+        present_on_mqtt = self._camera_registration_status_for_ui(camera) == "online"
+        mqtt_cfg = self.config.get("mqtt") if isinstance(getattr(self, "config", None), dict) else {}
+        if not isinstance(mqtt_cfg, dict):
+            mqtt_cfg = {}
+        mqtt_host = str(mqtt_cfg.get("host") or "").strip()
+        mqtt_port = mqtt_cfg.get("port")
+        backups = self.list_camera_config_backups(camera.camera_id, limit=1)
+        return {
+            "phase": phase,
+            "reason": reason,
+            "ip": str(camera.ip or "").strip(),
+            "web_ui_url": web_ui,
+            "is_paired": is_paired,
+            "present_on_mqtt_broker": present_on_mqtt,
+            "api_base_url": self._camera_api_base_url(camera) or f"https://{str(camera.ip).strip()}:1998/api/v1",
+            "has_config_backup": bool(backups),
+            "latest_backup": backups[0] if backups else None,
+            "mqtt_command_status": str(camera.mqtt_command_status or ""),
+            "mqtt_broker_host": mqtt_host,
+            "mqtt_broker_port": int(mqtt_port) if str(mqtt_port or "").strip().isdigit() else 1883,
         }
 
     def _camera_config_backup_prompt_for_ui(self, camera_id: str, *, is_paired: bool) -> dict[str, Any]:
@@ -6424,6 +7922,341 @@ class Hub:
         if resolved_conflict is None:
             return ""
         return f"IP {camera.ip} is now registered by {resolved_conflict.camera_id}; refusing to mix camera identities"
+
+    def _camera_peers_sharing_ip(self, camera: Camera) -> list[Camera]:
+        ip = str(camera.ip or "").strip()
+        if not ip:
+            return []
+        with self.state_lock:
+            snapshot = list(self.cameras.values())
+        return [
+            other
+            for other in snapshot
+            if other.camera_id != camera.camera_id and str(other.ip or "").strip() == ip
+        ]
+
+    def get_camera_migration_offer(self, camera_id: str) -> dict[str, Any] | None:
+        """Detect post-OTA identity replacement: same IP, different camera_id.
+
+        The live identity is the peer with the newer MQTT registration. Stable extras
+        (hostname / ONVIF serial / hardware id) strengthen the match but IP is enough
+        to offer migration — that is what already surfaces as identity_conflict.
+        """
+        resolved = self._resolve_camera_id(camera_id) or str(camera_id or "").strip().lower()
+        with self.state_lock:
+            camera = self.cameras.get(resolved)
+        if camera is None:
+            return None
+
+        peers = self._camera_peers_sharing_ip(camera)
+        if not peers:
+            return None
+
+        # Newest registration wins as the live post-OTA identity.
+        candidates = [camera, *peers]
+        live = max(candidates, key=lambda item: self._coerce_int(item.last_registration_at) or 0)
+        stale_candidates = [item for item in candidates if item.camera_id != live.camera_id]
+        if not stale_candidates:
+            return None
+        # Prefer the stale peer that looks most like the same device.
+        def stale_score(item: Camera) -> tuple[int, int]:
+            reasons = 0
+            if self._camera_identity_soft_match(item, live):
+                reasons += 1
+            paired = 1 if self._camera_api_token(item) else 0
+            backups = 0
+            if self.history_store is not None:
+                backups = len(self.history_store.list_config_snapshots(item.camera_id, limit=1))
+            return (reasons + paired + (1 if backups else 0), self._coerce_int(item.last_registration_at) or 0)
+
+        stale = max(stale_candidates, key=stale_score)
+        match_reasons = ["ip"]
+        if str(stale.hostname or "").strip() and str(stale.hostname).strip().lower() == str(live.hostname or "").strip().lower():
+            match_reasons.append("hostname")
+        if str(stale.onvif_serial_number or "").strip() and str(stale.onvif_serial_number).strip().lower() == str(
+            live.onvif_serial_number or ""
+        ).strip().lower():
+            match_reasons.append("onvif_serial")
+        if str(stale.onvif_hardware_id or "").strip() and str(stale.onvif_hardware_id).strip().lower() == str(
+            live.onvif_hardware_id or ""
+        ).strip().lower():
+            match_reasons.append("onvif_hardware")
+
+        stale_backups = self.list_camera_config_backups(stale.camera_id, limit=5)
+        viewing = "live" if resolved == live.camera_id else "stale"
+        live_web_ui = ""
+        try:
+            live_web_ui = self._camera_web_ui_url(live) or ""
+        except Exception:
+            live_web_ui = ""
+        if not live_web_ui and str(live.ip or "").strip():
+            live_web_ui = f"http://{str(live.ip).strip()}/"
+        mqtt_cfg = self.config.get("mqtt") if isinstance(getattr(self, "config", None), dict) else {}
+        if not isinstance(mqtt_cfg, dict):
+            mqtt_cfg = {}
+        mqtt_host = str(mqtt_cfg.get("host") or "").strip()
+        mqtt_port = mqtt_cfg.get("port")
+        return {
+            "stale_camera_id": stale.camera_id,
+            "live_camera_id": live.camera_id,
+            "ip": str(camera.ip or "").strip(),
+            "match_reasons": match_reasons,
+            "stale_name": str(stale.name or stale.camera_id),
+            "live_name": str(live.name or live.camera_id),
+            "stale_paired": bool(self._camera_api_token(stale)),
+            "live_paired": bool(self._camera_api_token(live)),
+            "stale_backup_count": len(self.list_camera_config_backups(stale.camera_id, limit=50)),
+            "stale_latest_backup": stale_backups[0] if stale_backups else None,
+            "viewing": viewing,
+            "live_web_ui_url": live_web_ui,
+            "live_needs_pairing": not bool(self._camera_api_token(live)),
+            "mqtt_broker_host": mqtt_host,
+            "mqtt_broker_port": int(mqtt_port) if str(mqtt_port or "").strip().isdigit() else 1883,
+        }
+
+    def _camera_identity_soft_match(self, left: Camera, right: Camera) -> bool:
+        left_host = str(left.hostname or "").strip().lower()
+        right_host = str(right.hostname or "").strip().lower()
+        if left_host and right_host and left_host == right_host:
+            return True
+        left_serial = str(left.onvif_serial_number or "").strip().lower()
+        right_serial = str(right.onvif_serial_number or "").strip().lower()
+        if left_serial and right_serial and left_serial == right_serial:
+            return True
+        left_hw = str(left.onvif_hardware_id or "").strip().lower()
+        right_hw = str(right.onvif_hardware_id or "").strip().lower()
+        if left_hw and right_hw and left_hw == right_hw:
+            return True
+        return False
+
+    def migrate_camera_identity(
+        self,
+        *,
+        from_camera_id: str,
+        to_camera_id: str,
+        restore_latest_backup: bool = False,
+    ) -> dict[str, Any]:
+        """Move hub history/backups from a stale identity onto the live post-OTA identity."""
+        stale_id = self._resolve_camera_id(from_camera_id) or str(from_camera_id or "").strip().lower()
+        live_id = self._resolve_camera_id(to_camera_id) or str(to_camera_id or "").strip().lower()
+        if not stale_id or not live_id:
+            raise RuntimeError("from_camera_id and to_camera_id are required")
+        if stale_id == live_id:
+            raise RuntimeError("Cannot migrate a camera onto itself")
+
+        with self.state_lock:
+            stale = self.cameras.get(stale_id)
+            live = self.cameras.get(live_id)
+        if stale is None:
+            raise RuntimeError(f"Unknown source camera: {from_camera_id}")
+        if live is None:
+            raise RuntimeError(f"Unknown target camera: {to_camera_id}")
+
+        stale_ip = str(stale.ip or "").strip()
+        live_ip = str(live.ip or "").strip()
+        if not stale_ip or stale_ip != live_ip:
+            raise RuntimeError("Migration requires both cameras to share the same IP (post-OTA replacement)")
+
+        # Ensure direction is stale → live (newer registration).
+        stale_reg = self._coerce_int(stale.last_registration_at) or 0
+        live_reg = self._coerce_int(live.last_registration_at) or 0
+        if stale_reg > live_reg:
+            raise RuntimeError(
+                f"{stale_id} has a newer MQTT registration than {live_id}; "
+                "migrate from the stale identity onto the live one"
+            )
+
+        latest_before = None
+        if self.history_store is not None:
+            latest_before = self.history_store.latest_config_snapshot_summary(stale_id)
+
+        rebind_counts: dict[str, int] = {}
+        if self.history_store is not None:
+            rebind_counts = self.history_store.rebind_camera_id(stale_id, live_id)
+
+        # Carry over friendly name / ONVIF metadata when the live row is sparse.
+        with self.state_lock:
+            current_live = self.cameras.get(live_id)
+            current_stale = self.cameras.get(stale_id)
+            if current_live is not None and current_stale is not None:
+                updates: dict[str, Any] = {}
+                if (not current_live.name or current_live.name == current_live.camera_id) and current_stale.name:
+                    updates["name"] = current_stale.name
+                if not current_live.onvif_username and current_stale.onvif_username:
+                    updates["onvif_username"] = current_stale.onvif_username
+                if not current_live.onvif_password and current_stale.onvif_password:
+                    updates["onvif_password"] = current_stale.onvif_password
+                if not current_live.onvif_endpoint and current_stale.onvif_endpoint:
+                    updates["onvif_endpoint"] = current_stale.onvif_endpoint
+                if not current_live.onvif_serial_number and current_stale.onvif_serial_number:
+                    updates["onvif_serial_number"] = current_stale.onvif_serial_number
+                if not current_live.onvif_hardware_id and current_stale.onvif_hardware_id:
+                    updates["onvif_hardware_id"] = current_stale.onvif_hardware_id
+                if not current_live.onvif_manufacturer and current_stale.onvif_manufacturer:
+                    updates["onvif_manufacturer"] = current_stale.onvif_manufacturer
+                if not current_live.onvif_model and current_stale.onvif_model:
+                    updates["onvif_model"] = current_stale.onvif_model
+                if updates:
+                    self.cameras[live_id] = replace(current_live, **updates)
+
+        # Promote live into static roster if stale was enrolled.
+        if stale_id in self.static_camera_ids:
+            self.static_camera_ids.discard(stale_id)
+            self.static_camera_ids.add(live_id)
+
+        # Drop stale identity from hub config cameras list if present.
+        config = self.export_config()
+        original_cameras = list(config.get("cameras", []))
+        filtered = [
+            item
+            for item in original_cameras
+            if str(item.get("id") or "").strip().lower() != stale_id
+        ]
+        # Ensure live exists in config when stale was a configured entry.
+        live_in_config = any(str(item.get("id") or "").strip().lower() == live_id for item in filtered)
+        if not live_in_config and any(str(item.get("id") or "").strip().lower() == stale_id for item in original_cameras):
+            with self.state_lock:
+                live_cam = self.cameras.get(live_id)
+            if live_cam is not None:
+                filtered.append(
+                    {
+                        "id": live_id,
+                        "name": live_cam.name,
+                        "ip": live_cam.ip,
+                        "snapshot_url": live_cam.snapshot_url,
+                        "api_key": live_cam.api_key,
+                        "api_base_url": live_cam.api_base_url,
+                        "api_token": live_cam.api_token,
+                        "onvif_endpoint": live_cam.onvif_endpoint,
+                        "onvif_username": live_cam.onvif_username,
+                        "onvif_password": live_cam.onvif_password,
+                    }
+                )
+        if filtered != original_cameras:
+            config["cameras"] = filtered
+            self.save_config(config)
+            # Avoid full reload_config race; persist roster via state.
+        self._persist_state()
+
+        delete_result: dict[str, Any]
+        try:
+            delete_result = self.unregister_camera(stale_id)
+        except Exception as error:
+            LOG.warning("Migration deleted history but failed to unregister %s: %s", stale_id, error)
+            with self.state_lock:
+                self.cameras.pop(stale_id, None)
+            self.static_camera_ids.discard(stale_id)
+            self._persist_state()
+            delete_result = {"camera_id": stale_id, "error": str(error)}
+
+        self._record_history_action(
+            live_id,
+            "camera_migrate",
+            "success",
+            f"Migrated hub identity {stale_id} → {live_id}",
+            source="hub",
+            payload_summary=json.dumps(
+                {
+                    "from_camera_id": stale_id,
+                    "to_camera_id": live_id,
+                    "rebind": rebind_counts,
+                    "restore_latest_backup": bool(restore_latest_backup),
+                },
+                sort_keys=True,
+            ),
+        )
+
+        restore_result: dict[str, Any] | None = None
+        restore_deferred: dict[str, Any] | None = None
+        restore_snapshot_id = int(latest_before.get("id") or 0) if latest_before else 0
+        if restore_latest_backup and restore_snapshot_id:
+            with self.state_lock:
+                live_cam = self.cameras.get(live_id)
+            paired = bool(live_cam and self._camera_api_token(live_cam))
+            api_online = bool(live_cam and str(live_cam.api_status or "").strip().lower() == "online")
+            api_base = self._camera_api_base_url(live_cam) if live_cam is not None else ""
+            if not paired or not api_online or not api_base:
+                reasons = []
+                if not paired:
+                    reasons.append("finish pairing so the native API token is installed")
+                if not api_online:
+                    reasons.append("wait until native API is online")
+                if not api_base:
+                    reasons.append("native API base URL is missing")
+                restore_deferred = {
+                    "status": "deferred",
+                    "status_detail": (
+                        "Config restore was skipped after migrate — "
+                        + "; ".join(reasons)
+                        + ". Open Config Backups on the live camera when it is ready."
+                    ),
+                    "snapshot_id": restore_snapshot_id,
+                }
+            else:
+                try:
+                    restore_result = self.restore_camera_config_backup(
+                        live_id,
+                        restore_snapshot_id,
+                        mode="compatible",
+                    )
+                except Exception as error:
+                    detail = str(error)
+                    # Connection / auth problems are expected pre-pair; do not fail the migrate.
+                    deferred_markers = (
+                        "connection refused",
+                        "timed out",
+                        "timeout",
+                        "unreachable",
+                        "name or service not known",
+                        "network is unreachable",
+                        "401",
+                        "403",
+                        "unauthorized",
+                    )
+                    lowered = detail.lower()
+                    if any(marker in lowered for marker in deferred_markers):
+                        restore_deferred = {
+                            "status": "deferred",
+                            "status_detail": (
+                                "Migrate finished, but config restore could not reach the camera "
+                                f"({detail}). Pair the live camera, then restore from Config Backups."
+                            ),
+                            "snapshot_id": restore_snapshot_id,
+                            "error": detail,
+                        }
+                    else:
+                        restore_result = {"status": "error", "status_detail": detail}
+
+        latest_after = None
+        if self.history_store is not None:
+            if restore_snapshot_id:
+                entry = self.history_store.get_config_snapshot(live_id, restore_snapshot_id)
+                if entry is not None:
+                    latest_after = self._config_snapshot_detail_for_ui(entry)
+            if latest_after is None:
+                backups = self.list_camera_config_backups(live_id, limit=1)
+                latest_after = backups[0] if backups else None
+
+        status_detail = f"Migrated {stale_id} → {live_id}"
+        if restore_result and restore_result.get("status") == "success":
+            status_detail = f"{status_detail}. Restored latest config backup."
+        elif restore_deferred:
+            status_detail = f"{status_detail}. {restore_deferred.get('status_detail')}"
+        elif restore_result and restore_result.get("status") == "error":
+            status_detail = f"{status_detail}. Restore failed: {restore_result.get('status_detail')}"
+
+        return {
+            "status": "success",
+            "status_detail": status_detail,
+            "from_camera_id": stale_id,
+            "to_camera_id": live_id,
+            "rebind": rebind_counts,
+            "delete_result": delete_result,
+            "latest_backup": latest_after,
+            "restore_result": restore_result,
+            "restore_deferred": restore_deferred,
+            "restore_available": bool(latest_after),
+        }
 
     def refresh_snapshot_cache(self, camera_id: str) -> bool:
         resolved = self._resolve_camera_id(camera_id) or camera_id.strip().lower()

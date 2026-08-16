@@ -138,7 +138,7 @@
 
         {% set privacy = namespace(supported=false) %}
         {% for stream in camera.native_stream_controls %}
-          {% if stream.osd_privacy_enabled_supported or stream.osd_privacy_text_supported or stream.osd_privacy_fill_color_supported or stream.osd_privacy_stroke_color_supported %}
+          {% if stream.osd_privacy_enabled_supported or stream.osd_privacy_text_supported or stream.osd_privacy_position_supported or stream.osd_privacy_fill_color_supported or stream.osd_privacy_stroke_color_supported %}
             {% set privacy.supported = true %}
           {% endif %}
         {% endfor %}
@@ -149,7 +149,7 @@
               <p class="text-body-secondary mb-3">Configure the dedicated privacy OSD layers for each stream. This mirrors the camera web UI and applies through the native API.</p>
               <div class="row g-3">
               {% for stream in camera.native_stream_controls %}
-                {% if stream.osd_privacy_enabled_supported or stream.osd_privacy_text_supported or stream.osd_privacy_fill_color_supported or stream.osd_privacy_stroke_color_supported %}
+                {% if stream.osd_privacy_enabled_supported or stream.osd_privacy_text_supported or stream.osd_privacy_position_supported or stream.osd_privacy_fill_color_supported or stream.osd_privacy_stroke_color_supported %}
                 <div class="col-12 col-xl-6">
                   <div class="border rounded p-3 h-100">
                     <h4 class="h6 mb-1">{{ stream.label }}</h4>
@@ -164,6 +164,15 @@
                     <div class="mb-3">
                       <label class="form-label" for="{{ stream.name }}_osd_privacy_text">Overlay text</label>
                       <input class="form-control" id="{{ stream.name }}_osd_privacy_text" type="text" name="{{ stream.name }}_osd_privacy_text" maxlength="160" value="{{ stream.osd_privacy_text }}" placeholder="PRIVACY ENABLED" {% if not stream.osd_privacy_text_supported %}disabled{% endif %}>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label" for="{{ stream.name }}_osd_privacy_position">Position</label>
+                      <select class="form-select" id="{{ stream.name }}_osd_privacy_position" name="{{ stream.name }}_osd_privacy_position" {% if not stream.osd_privacy_position_supported %}disabled{% endif %}>
+                        <option value="">—</option>
+                        {% for choice in camera.osd_position_choices %}
+                          <option value="{{ choice }}" {% if stream.osd_privacy_position == choice %}selected{% endif %}>{{ choice.replace('_', ' ')|title }}</option>
+                        {% endfor %}
+                      </select>
                     </div>
                     <div class="row g-3">
                       <div class="col-12 col-sm-6">
@@ -268,6 +277,24 @@
                     <label class="form-label" for="{{ stream.name }}_osd_usertext_format">Label text</label>
                     <input class="form-control" id="{{ stream.name }}_osd_usertext_format" type="text" name="{{ stream.name }}_osd_usertext_format" value="{{ stream.osd_usertext_format }}" {% if not stream.osd_usertext_format_supported %}disabled{% endif %}>
                   </div>
+                  <div class="col-12 col-md-6">
+                    <label class="form-label" for="{{ stream.name }}_osd_time_position">Time position</label>
+                    <select class="form-select" id="{{ stream.name }}_osd_time_position" name="{{ stream.name }}_osd_time_position" {% if not stream.osd_time_position_supported %}disabled{% endif %}>
+                      <option value="">—</option>
+                      {% for choice in camera.osd_position_choices %}
+                        <option value="{{ choice }}" {% if stream.osd_time_position == choice %}selected{% endif %}>{{ choice.replace('_', ' ')|title }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <label class="form-label" for="{{ stream.name }}_osd_usertext_position">Label position</label>
+                    <select class="form-select" id="{{ stream.name }}_osd_usertext_position" name="{{ stream.name }}_osd_usertext_position" {% if not stream.osd_usertext_position_supported %}disabled{% endif %}>
+                      <option value="">—</option>
+                      {% for choice in camera.osd_position_choices %}
+                        <option value="{{ choice }}" {% if stream.osd_usertext_position == choice %}selected{% endif %}>{{ choice.replace('_', ' ')|title }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
                 </div>
               </div>
             </div>
@@ -305,6 +332,22 @@
       };
 
       const renderEvent = (event) => {
+        if (event.event === 'plan' && Array.isArray(event.stages)) {
+          progress.innerHTML = '<div class="fw-semibold mb-2">Applying long-term settings</div>';
+          event.stages.forEach((stage) => {
+            const row = document.createElement('div');
+            row.className = 'hub-apply-progress-row';
+            row.dataset.state = 'pending';
+            if (stage.stage_id) row.setAttribute('data-stage-id', stage.stage_id);
+            const indexLabel = stage.index && stage.total ? `${stage.index}/${stage.total}` : '';
+            row.innerHTML = `
+              <span class="hub-apply-progress-index">${indexLabel}</span>
+              <span class="hub-apply-progress-message">${stage.label || stage.stage_id || ''}</span>
+            `;
+            progress.appendChild(row);
+          });
+          return;
+        }
         if (event.event === 'complete') {
           const summary = document.createElement('div');
           summary.className = 'hub-apply-progress-row';

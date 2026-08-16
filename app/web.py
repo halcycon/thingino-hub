@@ -496,7 +496,9 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
                 if raw_value is not None:
                     payload[f"native_daynight_schedule_{field}"] = str(raw_value or "").strip()
 
-        stream_field_pattern = re.compile(r"^(stream\d+)_(enabled|audio_enabled|width|height|fps|bitrate|format|mode|osd_enabled|osd_time_enabled|osd_usertext_enabled|osd_usertext_format)$")
+        stream_field_pattern = re.compile(
+            r"^(stream\d+)_(enabled|audio_enabled|width|height|fps|bitrate|format|mode|osd_enabled|osd_time_enabled|osd_time_position|osd_usertext_enabled|osd_usertext_format|osd_usertext_position)$"
+        )
         stream_present_pattern = re.compile(r"^(stream\d+)_(enabled|audio_enabled|osd_enabled|osd_time_enabled|osd_usertext_enabled)_present$")
         stream_updates: dict[str, dict[str, Any]] = {}
         for key in form.keys():
@@ -522,7 +524,7 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
                 if raw_value is None or str(raw_value).strip() == "":
                     continue
                 stream_update[field_name] = str(raw_value).strip()
-            elif field_name == "osd_usertext_format":
+            elif field_name in {"osd_usertext_format", "osd_time_position", "osd_usertext_position"}:
                 stream_update[field_name] = str(raw_value or "")
             else:
                 stream_update[field_name] = str(raw_value or "")
@@ -547,6 +549,13 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
                 stream_name = match.group(1)
                 stream_update = stream_updates.setdefault(stream_name, {"name": stream_name})
                 stream_update["osd_privacy_text"] = str(form.get(form_key) or "")
+                continue
+
+            privacy_position_match = re.match(r"^(stream\d+)_osd_privacy_position$", form_key)
+            if privacy_position_match is not None:
+                stream_name = privacy_position_match.group(1)
+                stream_update = stream_updates.setdefault(stream_name, {"name": stream_name})
+                stream_update["osd_privacy_position"] = str(form.get(form_key) or "")
                 continue
 
             match = privacy_color_pattern.match(form_key)
@@ -662,6 +671,8 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
                 stream_update["osd_privacy_enabled"] = bool(privacy_payload.get("enabled"))
             if "text" in privacy_payload:
                 stream_update["osd_privacy_text"] = str(privacy_payload.get("text") or "")
+            if "position" in privacy_payload:
+                stream_update["osd_privacy_position"] = str(privacy_payload.get("position") or "")
             if "fill_color" in privacy_payload:
                 fill_color_value, fill_alpha = _split_hex_color_alpha(privacy_payload.get("fill_color"))
                 stream_update["osd_privacy_fill_color_value"] = fill_color_value
@@ -1113,6 +1124,33 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
     def camera_config_backup_restore(camera_id: str, snapshot_id: int) -> Response:
         redirect_url = url_for("camera_config_backups", camera_id=camera_id)
         mode = str(request.form.get("mode") or "compatible").strip().lower()
+        wants_stream = (
+            "application/x-ndjson" in str(request.headers.get("Accept") or "").lower()
+            or str(request.args.get("stream") or request.form.get("stream") or "").strip() in {"1", "true", "yes"}
+        )
+        if wants_stream:
+            def generate():
+                try:
+                    for event in hub.iter_restore_camera_config_backup(camera_id, snapshot_id, mode=mode):
+                        yield json.dumps(event, sort_keys=True) + "\n"
+                except Exception as error:
+                    yield json.dumps(
+                        {
+                            "event": "complete",
+                            "ok": False,
+                            "message": str(error),
+                        },
+                        sort_keys=True,
+                    ) + "\n"
+
+            return Response(
+                generate(),
+                mimetype="application/x-ndjson",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
         try:
             result = hub.restore_camera_config_backup(camera_id, snapshot_id, mode=mode)
             return action_response(
@@ -1134,6 +1172,179 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
                 "success",
                 redirect_url,
                 camera_id=camera_id,
+            )
+        except Exception as error:
+            return action_response(str(error), "error", redirect_url, camera_id=camera_id, status_code=400)
+
+    @app.get("/camera/<camera_id>/config-clone")
+    def camera_config_clone(camera_id: str) -> str:
+        return render_template(
+            "camera_config_clone.html",
+            camera=hub.get_camera_config_clone_for_ui(camera_id),
+        )
+
+    @app.get("/camera/<camera_id>/config-clone/pull")
+    def camera_config_clone_pull_preview(camera_id: str) -> str | Response:
+        source_camera_id = str(request.args.get("source_camera_id") or "").strip()
+        source_kind = str(request.args.get("source_kind") or "live").strip().lower() or "live"
+        snapshot_raw = str(request.args.get("snapshot_id") or "").strip()
+        snapshot_id = int(snapshot_raw) if snapshot_raw.isdigit() else None
+        try:
+            if source_kind == "backup" and snapshot_id is None:
+                raise RuntimeError("Select a backup snapshot to pull from")
+            preview = hub.preview_camera_config_clone(
+                camera_id,
+                source_camera_id=source_camera_id,
+                source_kind=source_kind,
+                snapshot_id=snapshot_id,
+            )
+            camera = hub.get_camera_for_ui(camera_id)
+            return render_template(
+                "camera_config_clone_pull.html",
+                camera=camera,
+                preview=preview,
+            )
+        except Exception as error:
+            flash(str(error), "error")
+            return redirect(url_for("camera_config_clone", camera_id=camera_id))
+
+    @app.post("/camera/<camera_id>/config-clone/pull")
+    def camera_config_clone_pull_apply(camera_id: str) -> Response:
+        redirect_url = url_for("camera_config_backups", camera_id=camera_id)
+        source_camera_id = str(request.form.get("source_camera_id") or "").strip()
+        source_kind = str(request.form.get("source_kind") or "live").strip().lower() or "live"
+        snapshot_raw = str(request.form.get("snapshot_id") or "").strip()
+        snapshot_id = int(snapshot_raw) if snapshot_raw.isdigit() else None
+        mode = str(request.form.get("mode") or "compatible").strip().lower()
+        selected_paths = [str(value).strip() for value in request.form.getlist("path") if str(value).strip()]
+        wants_stream = (
+            "application/x-ndjson" in str(request.headers.get("Accept") or "").lower()
+            or str(request.args.get("stream") or request.form.get("stream") or "").strip() in {"1", "true", "yes"}
+        )
+        if wants_stream:
+            def generate():
+                try:
+                    for event in hub.iter_apply_camera_config_clone(
+                        camera_id,
+                        source_camera_id=source_camera_id,
+                        source_kind=source_kind,
+                        snapshot_id=snapshot_id,
+                        selected_paths=selected_paths,
+                        mode=mode,
+                    ):
+                        yield json.dumps(event, sort_keys=True) + "\n"
+                except Exception as error:
+                    yield json.dumps(
+                        {"event": "complete", "ok": False, "message": str(error)},
+                        sort_keys=True,
+                    ) + "\n"
+
+            return Response(
+                generate(),
+                mimetype="application/x-ndjson",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        try:
+            result = hub.apply_camera_config_clone(
+                camera_id,
+                source_camera_id=source_camera_id,
+                source_kind=source_kind,
+                snapshot_id=snapshot_id,
+                selected_paths=selected_paths,
+                mode=mode,
+            )
+            return action_response(
+                str(result.get("status_detail") or "Config clone finished."),
+                "success",
+                redirect_url,
+                camera_id=camera_id,
+            )
+        except Exception as error:
+            return action_response(str(error), "error", redirect_url, camera_id=camera_id, status_code=400)
+
+    @app.get("/camera/<camera_id>/config-clone/push")
+    def camera_config_clone_push_preview(camera_id: str) -> str | Response:
+        source_kind = str(request.args.get("source_kind") or "live").strip().lower() or "live"
+        snapshot_raw = str(request.args.get("snapshot_id") or "").strip()
+        snapshot_id = int(snapshot_raw) if snapshot_raw.isdigit() else None
+        target_camera_ids = [str(value).strip() for value in request.args.getlist("target_camera_id") if str(value).strip()]
+        try:
+            if source_kind == "backup" and snapshot_id is None:
+                raise RuntimeError("Select a backup snapshot to push")
+            if not target_camera_ids:
+                raise RuntimeError("Select at least one target camera")
+            preview = hub.preview_camera_config_clone_push(
+                camera_id,
+                target_camera_ids=target_camera_ids,
+                source_kind=source_kind,
+                snapshot_id=snapshot_id,
+            )
+            camera = hub.get_camera_for_ui(camera_id)
+            return render_template(
+                "camera_config_clone_push.html",
+                camera=camera,
+                preview=preview,
+            )
+        except Exception as error:
+            flash(str(error), "error")
+            return redirect(url_for("camera_config_clone", camera_id=camera_id))
+
+    @app.post("/camera/<camera_id>/config-clone/push")
+    def camera_config_clone_push_apply(camera_id: str) -> Response:
+        redirect_url = url_for("camera_config_backups", camera_id=camera_id)
+        source_kind = str(request.form.get("source_kind") or "live").strip().lower() or "live"
+        snapshot_raw = str(request.form.get("snapshot_id") or "").strip()
+        snapshot_id = int(snapshot_raw) if snapshot_raw.isdigit() else None
+        mode = str(request.form.get("mode") or "compatible").strip().lower()
+        selected_paths = [str(value).strip() for value in request.form.getlist("path") if str(value).strip()]
+        target_camera_ids = [
+            str(value).strip() for value in request.form.getlist("target_camera_id") if str(value).strip()
+        ]
+        wants_stream = (
+            "application/x-ndjson" in str(request.headers.get("Accept") or "").lower()
+            or str(request.args.get("stream") or request.form.get("stream") or "").strip() in {"1", "true", "yes"}
+        )
+        if wants_stream:
+            def generate():
+                try:
+                    for event in hub.iter_apply_camera_config_clone_push(
+                        camera_id,
+                        target_camera_ids=target_camera_ids,
+                        source_kind=source_kind,
+                        snapshot_id=snapshot_id,
+                        selected_paths=selected_paths,
+                        mode=mode,
+                    ):
+                        yield json.dumps(event, sort_keys=True) + "\n"
+                except Exception as error:
+                    yield json.dumps(
+                        {"event": "complete", "ok": False, "message": str(error)},
+                        sort_keys=True,
+                    ) + "\n"
+
+            return Response(
+                generate(),
+                mimetype="application/x-ndjson",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        try:
+            result = hub.apply_camera_config_clone_push(
+                camera_id,
+                target_camera_ids=target_camera_ids,
+                source_kind=source_kind,
+                snapshot_id=snapshot_id,
+                selected_paths=selected_paths,
+                mode=mode,
+            )
+            status = "success" if result.get("status") == "success" else "warning"
+            if result.get("status") == "error":
+                status = "error"
+            return action_response(
+                str(result.get("status_detail") or "Config clone push finished."),
+                status,
+                redirect_url,
+                camera_id=camera_id,
+                status_code=400 if status == "error" else 200,
             )
         except Exception as error:
             return action_response(str(error), "error", redirect_url, camera_id=camera_id, status_code=400)
@@ -1912,6 +2123,60 @@ def create_web_app(hub: "Hub", ui_username: str = "", ui_password: str = "", api
                 status_code=500,
             )
 
+    @app.post("/camera/<camera_id>/migrate")
+    def camera_migrate_identity(camera_id: str) -> Response:
+        from_camera_id = str(request.form.get("from_camera_id") or "").strip()
+        to_camera_id = str(request.form.get("to_camera_id") or "").strip()
+        restore_latest = str(request.form.get("restore_latest_backup") or "").strip() in {"1", "true", "yes", "on"}
+        redirect_url = url_for("camera_detail", camera_id=to_camera_id or camera_id)
+        try:
+            result = hub.migrate_camera_identity(
+                from_camera_id=from_camera_id,
+                to_camera_id=to_camera_id,
+                restore_latest_backup=restore_latest,
+            )
+            message = str(result.get("status_detail") or "Camera identity migrated.")
+            category = "success"
+            live_id = str(result.get("to_camera_id") or to_camera_id)
+            redirect_url = url_for("camera_detail", camera_id=live_id)
+            deferred = result.get("restore_deferred") if isinstance(result.get("restore_deferred"), dict) else None
+            restore = result.get("restore_result") if isinstance(result.get("restore_result"), dict) else None
+            latest = result.get("latest_backup") if isinstance(result.get("latest_backup"), dict) else None
+            snapshot_id = None
+            if deferred and deferred.get("snapshot_id"):
+                snapshot_id = int(deferred["snapshot_id"])
+            elif latest and latest.get("snapshot_id"):
+                snapshot_id = int(latest["snapshot_id"])
+
+            if restore and restore.get("status") == "error":
+                category = "warning"
+                message = str(result.get("status_detail") or message)
+            elif deferred or (result.get("restore_available") and snapshot_id and not (restore and restore.get("status") == "success")):
+                redirect_url = url_for(
+                    "camera_config_backup_restore_preview",
+                    camera_id=live_id,
+                    snapshot_id=snapshot_id,
+                )
+                if deferred:
+                    category = "warning"
+                else:
+                    message = f"{message} Review the migrated backup before applying."
+
+            return action_response(
+                message,
+                category,
+                redirect_url,
+                camera_id=live_id,
+            )
+        except Exception as error:
+            return action_response(
+                str(error),
+                "error",
+                url_for("camera_detail", camera_id=camera_id),
+                camera_id=camera_id,
+                status_code=400,
+            )
+
     @app.get("/snapshot/<camera_id>")
     def preview_snapshot(camera_id: str) -> Response:
         stream_name = str(request.args.get("stream") or "ch0").strip().lower() or "ch0"
@@ -2410,10 +2675,13 @@ def _supported_config_patch_from_form(form: Any) -> dict[str, Any]:
             daynight["schedule"] = schedule
         payload["daynight"] = daynight
 
-    stream_field_pattern = re.compile(r"^(stream\d+)_(enabled|audio_enabled|width|height|fps|bitrate|format|mode|osd_enabled|osd_time_enabled|osd_usertext_enabled|osd_usertext_format)$")
+    stream_field_pattern = re.compile(
+        r"^(stream\d+)_(enabled|audio_enabled|width|height|fps|bitrate|format|mode|osd_enabled|osd_time_enabled|osd_time_position|osd_usertext_enabled|osd_usertext_format|osd_usertext_position)$"
+    )
     stream_present_pattern = re.compile(r"^(stream\d+)_(enabled|audio_enabled|osd_enabled|osd_time_enabled|osd_usertext_enabled)_present$")
     privacy_enabled_present_pattern = re.compile(r"^(stream\d+)_osd_privacy_enabled_present$")
     privacy_text_pattern = re.compile(r"^(stream\d+)_osd_privacy_text$")
+    privacy_position_pattern = re.compile(r"^(stream\d+)_osd_privacy_position$")
     privacy_color_pattern = re.compile(r"^(stream\d+)_osd_privacy_(fill|stroke)_color$")
     stream_payloads: dict[str, dict[str, Any]] = {}
     restart_thread_mask = 0
@@ -2476,6 +2744,22 @@ def _supported_config_patch_from_form(form: Any) -> dict[str, Any]:
                 usertext_payload["format"] = value
                 restart_thread_mask |= thread_video | thread_osd
             continue
+        if field_name == "osd_time_position":
+            value = str(raw_value or "").strip()
+            if value:
+                osd_payload = stream_payload.setdefault("osd", {})
+                time_payload = osd_payload.setdefault("time", {})
+                time_payload["position"] = value
+                restart_thread_mask |= thread_video | thread_osd
+            continue
+        if field_name == "osd_usertext_position":
+            value = str(raw_value or "").strip()
+            if value:
+                osd_payload = stream_payload.setdefault("osd", {})
+                usertext_payload = osd_payload.setdefault("usertext", {})
+                usertext_payload["position"] = value
+                restart_thread_mask |= thread_video | thread_osd
+            continue
         value = str(raw_value or "").strip()
         if value:
             stream_payload[field_name] = value
@@ -2491,6 +2775,18 @@ def _supported_config_patch_from_form(form: Any) -> dict[str, Any]:
             privacy_payload = osd_payload.setdefault("privacy", {})
             privacy_payload["text"] = str(form.get(form_key) or "")
             restart_thread_mask |= thread_video | thread_osd
+            continue
+
+        match = privacy_position_pattern.match(form_key)
+        if match is not None:
+            stream_name = match.group(1)
+            value = str(form.get(form_key) or "").strip()
+            if value:
+                stream_payload = stream_payloads.setdefault(stream_name, {})
+                osd_payload = stream_payload.setdefault("osd", {})
+                privacy_payload = osd_payload.setdefault("privacy", {})
+                privacy_payload["position"] = value
+                restart_thread_mask |= thread_video | thread_osd
             continue
 
         match = privacy_color_pattern.match(form_key)

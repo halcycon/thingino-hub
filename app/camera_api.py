@@ -50,7 +50,14 @@ class CameraApiClient:
         return self._json_request("GET", "/config", timeout=self.timeout if timeout is None else timeout)
 
     def patch_config(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._json_request("PATCH", "/config", payload=payload, timeout=self._control_timeout())
+        # Some agent builds return an empty body on successful omnibus PATCH.
+        return self._json_request(
+            "PATCH",
+            "/config",
+            payload=payload,
+            timeout=self._control_timeout(),
+            allow_empty=True,
+        )
 
     def control_service(self, service: str, operation: str) -> dict[str, Any]:
         normalized_service = urllib.parse.quote(str(service or "").strip().lower(), safe="")
@@ -230,12 +237,28 @@ class CameraApiClient:
         path: str,
         payload: dict[str, Any] | None = None,
         timeout: int | None = None,
+        *,
+        allow_empty: bool = False,
     ) -> dict[str, Any]:
         body, _headers = self._request(method, path, payload=payload, accept="application/json", timeout=timeout)
+        if not body.strip():
+            if allow_empty:
+                return {"status": "accepted"}
+            raise CameraApiError(
+                f"Empty response for {path} — native API returned no JSON "
+                "(agent overloaded, wrong token, or listener not ready)"
+            )
         try:
-            decoded = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError as error:
             raise CameraApiError(f"Invalid JSON response for {path}: {error}") from error
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as error:
+            preview = " ".join(text.strip().split())
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
+            raise CameraApiError(f"Invalid JSON response for {path}: {error} (body starts: {preview!r})") from error
         if not isinstance(decoded, dict):
             raise CameraApiError(f"Unexpected JSON response for {path}")
         return decoded

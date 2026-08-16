@@ -673,6 +673,36 @@ class NativeConfigSettingsSplitTests(unittest.TestCase):
         self.assertIn(("streams/0/osd/usertext/enabled", {"enabled": True}), patches)
         self.assertIn(("streams/0/osd/usertext/format", {"format": "Bird Box 01"}), patches)
 
+    def test_split_osd_position_via_writable_settings_catalog(self) -> None:
+        hub = object.__new__(Hub)
+        patches, residual = Hub._split_native_config_patch_for_settings(
+            hub,
+            {
+                "stream0": {
+                    "osd": {
+                        "time": {"position": "top_left"},
+                        "usertext": {"position": "bottom_right", "format": "Garden"},
+                        "privacy": {"position": "middle_center", "text": "PRIVATE"},
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(residual, {})
+        self.assertIn(("streams/0/osd/time/position", {"position": "top_left"}), patches)
+        self.assertIn(("streams/0/osd/usertext/position", {"position": "bottom_right"}), patches)
+        self.assertIn(("streams/0/osd/usertext/format", {"format": "Garden"}), patches)
+        self.assertIn(("streams/0/osd/privacy/position", {"position": "middle_center"}), patches)
+        self.assertIn(("streams/0/osd/privacy/text", {"text": "PRIVATE"}), patches)
+
+    def test_writable_settings_catalog_marks_position_for_ui(self) -> None:
+        hub = object.__new__(Hub)
+        catalog = Hub._native_writable_settings_catalog(hub, stream_ids=[0])
+        by_path = {entry["config_path"]: entry for entry in catalog}
+        self.assertEqual(by_path["stream0.osd.time.position"]["settings_path"], "streams/0/osd/time/position")
+        self.assertTrue(by_path["stream0.osd.time.position"]["ui"])
+        self.assertIn("top_left", by_path["stream0.osd.usertext.position"]["enum"])
+
     def test_patch_camera_config_writes_osd_via_settings_not_omnibus(self) -> None:
         hub = object.__new__(Hub)
         hub.state_lock = threading.Lock()

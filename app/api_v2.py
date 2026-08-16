@@ -113,6 +113,40 @@ class ConfigRestoreRequest(BaseModel):
     mode: Literal["compatible", "best_effort"] = "compatible"
 
 
+class ConfigClonePreviewRequest(BaseModel):
+    source_camera_id: str
+    source_kind: Literal["live", "backup"] = "live"
+    snapshot_id: int | None = None
+
+
+class ConfigCloneApplyRequest(BaseModel):
+    source_camera_id: str
+    source_kind: Literal["live", "backup"] = "live"
+    snapshot_id: int | None = None
+    selected_paths: list[str] | None = None
+    mode: Literal["compatible", "best_effort"] = "compatible"
+
+
+class ConfigClonePushPreviewRequest(BaseModel):
+    target_camera_ids: list[str]
+    source_kind: Literal["live", "backup"] = "live"
+    snapshot_id: int | None = None
+
+
+class ConfigClonePushApplyRequest(BaseModel):
+    target_camera_ids: list[str]
+    source_kind: Literal["live", "backup"] = "live"
+    snapshot_id: int | None = None
+    selected_paths: list[str] | None = None
+    mode: Literal["compatible", "best_effort"] = "compatible"
+
+
+class CameraMigrateRequest(BaseModel):
+    from_camera_id: str
+    to_camera_id: str
+    restore_latest_backup: bool = False
+
+
 def _camera_teaser_payload(camera: dict[str, Any]) -> dict[str, Any]:
     return {
         "camera_id": str(camera.get("camera_id") or ""),
@@ -582,6 +616,91 @@ def create_api_v2_app(hub: "Hub") -> FastAPI:
         except Exception as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         return {"ok": True, "message": f"Deleted config backup #{snapshot_id}.", "result": result}
+
+    @app.post("/api/v2/cameras/{camera_id}/config-clone/pull/preview")
+    def api_v2_config_clone_pull_preview(camera_id: str, request: ConfigClonePreviewRequest) -> dict[str, Any]:
+        try:
+            preview = hub.preview_camera_config_clone(
+                camera_id,
+                source_camera_id=request.source_camera_id,
+                source_kind=request.source_kind,
+                snapshot_id=request.snapshot_id,
+            )
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "preview": preview}
+
+    @app.post("/api/v2/cameras/{camera_id}/config-clone/pull")
+    def api_v2_config_clone_pull(camera_id: str, request: ConfigCloneApplyRequest) -> dict[str, Any]:
+        try:
+            result = hub.apply_camera_config_clone(
+                camera_id,
+                source_camera_id=request.source_camera_id,
+                source_kind=request.source_kind,
+                snapshot_id=request.snapshot_id,
+                selected_paths=request.selected_paths,
+                mode=request.mode,
+            )
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "message": str(result.get("status_detail") or "Config clone finished."), "result": result}
+
+    @app.post("/api/v2/cameras/{camera_id}/config-clone/push/preview")
+    def api_v2_config_clone_push_preview(camera_id: str, request: ConfigClonePushPreviewRequest) -> dict[str, Any]:
+        try:
+            preview = hub.preview_camera_config_clone_push(
+                camera_id,
+                target_camera_ids=request.target_camera_ids,
+                source_kind=request.source_kind,
+                snapshot_id=request.snapshot_id,
+            )
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "preview": preview}
+
+    @app.post("/api/v2/cameras/{camera_id}/config-clone/push")
+    def api_v2_config_clone_push(camera_id: str, request: ConfigClonePushApplyRequest) -> dict[str, Any]:
+        try:
+            result = hub.apply_camera_config_clone_push(
+                camera_id,
+                target_camera_ids=request.target_camera_ids,
+                source_kind=request.source_kind,
+                snapshot_id=request.snapshot_id,
+                selected_paths=request.selected_paths,
+                mode=request.mode,
+            )
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        ok = result.get("status") != "error"
+        return {
+            "ok": ok,
+            "message": str(result.get("status_detail") or "Config clone push finished."),
+            "result": result,
+        }
+
+    @app.get("/api/v2/cameras/{camera_id}/migration-offer")
+    def api_v2_camera_migration_offer(camera_id: str) -> dict[str, Any]:
+        try:
+            offer = hub.get_camera_migration_offer(camera_id)
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "camera_id": camera_id, "offer": offer}
+
+    @app.post("/api/v2/cameras/{camera_id}/migrate")
+    def api_v2_camera_migrate(camera_id: str, request: CameraMigrateRequest) -> dict[str, Any]:
+        try:
+            result = hub.migrate_camera_identity(
+                from_camera_id=request.from_camera_id,
+                to_camera_id=request.to_camera_id,
+                restore_latest_backup=bool(request.restore_latest_backup),
+            )
+        except Exception as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "ok": True,
+            "message": str(result.get("status_detail") or "Camera identity migrated."),
+            "result": result,
+        }
 
     @app.post("/api/v2/cameras/{camera_id}/delete")
     def api_v2_delete_camera(camera_id: str) -> dict[str, Any]:

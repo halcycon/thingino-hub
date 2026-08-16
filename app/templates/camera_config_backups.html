@@ -37,8 +37,16 @@
             If capture fails (slow camera / timeout), the apply progress and the warning above say so — settings may still have been applied.
             Restore is always explicit and never becomes live desired state.
           </p>
+          <p class="small text-body-secondary mb-0 mt-2">
+            <strong>Restore coverage:</strong> backups store the full config JSON (including stream/OSD when the agent returns them),
+            but apply only writes fields the hub can peel onto native <span class="font-monospace">/settings/...</span> leaves.
+            Raptor’s omnibus <span class="font-monospace">PATCH /config</span> ignores stream/OSD, so those must go through settings paths.
+            The hub peels stream/OSD (including OSD position) from a shared writable-settings catalog onto those leaves.
+            Pairing secrets are never restored.
+          </p>
         </div>
         <div class="d-flex flex-wrap gap-2 align-items-start">
+          <a class="btn btn-outline-primary" href="{{ url_for('camera_config_clone', camera_id=camera.camera_id) }}">Clone config</a>
           <form action="{{ url_for('camera_config_backup_create', camera_id=camera.camera_id) }}" method="post">
             <input type="hidden" name="label" value="Manual backup">
             <button class="btn btn-primary" type="submit" {% if camera.api_status != 'online' or not camera.history_enabled %}disabled{% endif %}>Backup now</button>

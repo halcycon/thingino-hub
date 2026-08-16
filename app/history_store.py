@@ -119,6 +119,40 @@ class HistoryStore:
             self._ensure_column("state_samples", "has_cached_snapshot", "INTEGER")
             self._conn.commit()
 
+    def rebind_camera_id(self, old_camera_id: str, new_camera_id: str) -> dict[str, int]:
+        """Move history rows from one camera identity to another (OTA / reflash)."""
+        old_id = str(old_camera_id or "").strip().lower()
+        new_id = str(new_camera_id or "").strip().lower()
+        if not old_id or not new_id:
+            raise ValueError("old_camera_id and new_camera_id are required")
+        if old_id == new_id:
+            return {
+                "action_events": 0,
+                "state_samples": 0,
+                "config_changes": 0,
+                "config_snapshots": 0,
+            }
+
+        tables = (
+            "action_events",
+            "state_samples",
+            "config_changes",
+            "config_snapshots",
+        )
+        counts: dict[str, int] = {}
+        with self._lock:
+            for table in tables:
+                cursor = self._conn.execute(
+                    f"UPDATE {table} SET camera_id = ? WHERE camera_id = ?",
+                    (new_id, old_id),
+                )
+                counts[table] = int(cursor.rowcount or 0)
+            self._prune_action_events(new_id)
+            self._prune_state_samples(new_id)
+            self._prune_config_snapshots(new_id)
+            self._conn.commit()
+        return counts
+
     def _ensure_column(self, table_name: str, column_name: str, column_type: str) -> None:
         columns = {
             str(row["name"])

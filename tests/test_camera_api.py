@@ -49,6 +49,28 @@ class CameraApiClientTests(unittest.TestCase):
 
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 20)
 
+    def test_patch_config_accepts_empty_success_response(self) -> None:
+        client = CameraApiClient("https://camera/api/v1", token="token", timeout=5)
+
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b"")):
+            result = client.patch_config({"motion": {"enabled": True}})
+
+        self.assertEqual(result, {"status": "accepted"})
+
+    def test_get_config_rejects_empty_response(self) -> None:
+        client = CameraApiClient("https://camera/api/v1", token="token", timeout=5)
+
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b"")):
+            with self.assertRaisesRegex(RuntimeError, "Empty response for /config"):
+                client.get_config()
+
+    def test_get_config_includes_body_preview_on_invalid_json(self) -> None:
+        client = CameraApiClient("https://camera/api/v1", token="token", timeout=5)
+
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b"<html>nope</html>")):
+            with self.assertRaisesRegex(RuntimeError, "body starts"):
+                client.get_config()
+
     def test_patch_setting_accepts_empty_success_response(self) -> None:
         client = CameraApiClient("https://camera/api/v1", token="token", timeout=5)
 
